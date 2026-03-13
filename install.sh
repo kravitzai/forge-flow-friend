@@ -4,30 +4,51 @@
 # Downloads a pre-built binary from GitHub Releases and installs
 # it as a systemd service.
 #
-# Usage (recommended — API token auth):
-#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/connector-agent/install.sh \
+# Usage — Proxmox (API token auth):
+#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
 #     | bash -s -- \
 #     --token 'fgc_...' \
+#     --target-type 'proxmox' \
 #     --proxmox-url 'https://192.168.1.100:8006' \
 #     --proxmox-token-id 'monitoring@pve!forgeai' \
 #     --proxmox-token-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
 #
-# Password auth (fallback — prompted securely, never passed on CLI):
+# Usage — TrueNAS (API key auth):
 #   curl -fsSL ... | bash -s -- \
-#     --token "fgc_..." \
-#     --proxmox-url "https://192.168.1.100:8006" \
-#     --proxmox-user "root@pam"
-#   # The script will securely prompt for the password.
+#     --token 'fgc_...' \
+#     --target-type 'truenas' \
+#     --truenas-url 'https://192.168.1.50/api/v2.0' \
+#     --truenas-api-key '1-xxxxxxxxxxxx'
+#
+# Usage — Nutanix (username + prompted password):
+#   curl -fsSL ... | bash -s -- \
+#     --token 'fgc_...' \
+#     --target-type 'nutanix' \
+#     --nutanix-url 'https://192.168.1.60:9440' \
+#     --nutanix-username 'admin'
 
 set -euo pipefail
 
 REPO="kravitzai/forge-flow-friend"
 CONNECTOR_TOKEN=""
+TARGET_TYPE="proxmox"
+
+# Proxmox
 PROXMOX_BASE_URL=""
 PROXMOX_USERNAME=""
 PROXMOX_PASSWORD=""
 PROXMOX_TOKEN_ID=""
 PROXMOX_TOKEN_SECRET=""
+
+# TrueNAS
+TRUENAS_URL=""
+TRUENAS_API_KEY=""
+
+# Nutanix
+NUTANIX_URL=""
+NUTANIX_USERNAME=""
+NUTANIX_PASSWORD=""
+
 INSECURE_SKIP_VERIFY="false"
 POLL_INTERVAL_SECONDS="30"
 INSTALL_DIR="/usr/local/bin"
@@ -37,13 +58,18 @@ SERVICE_USER="forgeai"
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --token) CONNECTOR_TOKEN="$2"; shift 2 ;;
-    --proxmox-url) PROXMOX_BASE_URL="$2"; shift 2 ;;
-    --proxmox-user) PROXMOX_USERNAME="$2"; shift 2 ;;
-    --proxmox-token-id) PROXMOX_TOKEN_ID="$2"; shift 2 ;;
-    --proxmox-token-secret) PROXMOX_TOKEN_SECRET="$2"; shift 2 ;;
-    --insecure) INSECURE_SKIP_VERIFY="true"; shift ;;
-    --poll-interval) POLL_INTERVAL_SECONDS="$2"; shift 2 ;;
+    --token)                CONNECTOR_TOKEN="$2";       shift 2 ;;
+    --target-type)          TARGET_TYPE="$2";           shift 2 ;;
+    --proxmox-url)          PROXMOX_BASE_URL="$2";      shift 2 ;;
+    --proxmox-user)         PROXMOX_USERNAME="$2";      shift 2 ;;
+    --proxmox-token-id)     PROXMOX_TOKEN_ID="$2";      shift 2 ;;
+    --proxmox-token-secret) PROXMOX_TOKEN_SECRET="$2";  shift 2 ;;
+    --truenas-url)          TRUENAS_URL="$2";           shift 2 ;;
+    --truenas-api-key)      TRUENAS_API_KEY="$2";       shift 2 ;;
+    --nutanix-url)          NUTANIX_URL="$2";           shift 2 ;;
+    --nutanix-username)     NUTANIX_USERNAME="$2";      shift 2 ;;
+    --insecure)             INSECURE_SKIP_VERIFY="true"; shift ;;
+    --poll-interval)        POLL_INTERVAL_SECONDS="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -57,42 +83,92 @@ echo "╔═══════════════════════�
 echo "║  ForgeAI Local Connector — Installer     ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
+echo "→ Target type: ${TARGET_TYPE}"
 
-# ── Credential handling ──
-# If no API token provided, fall back to username + interactive password prompt.
-# Passwords are NEVER accepted as command-line arguments.
-if [ -n "$PROXMOX_TOKEN_ID" ] && [ -n "$PROXMOX_TOKEN_SECRET" ]; then
-  echo "→ Auth: Proxmox API token"
-elif [ -n "$PROXMOX_USERNAME" ]; then
-  echo "→ Auth: Username/password (password will be prompted)"
-  # Check if password is already set via environment variable
-  if [ -z "$PROXMOX_PASSWORD" ]; then
-    if [ -t 0 ]; then
-      # Interactive terminal — prompt securely
-      echo ""
-      read -s -p "  Enter Proxmox password for ${PROXMOX_USERNAME}: " PROXMOX_PASSWORD
-      echo ""
-    else
-      # Non-interactive (piped) — check env
-      echo "  ⚠️  No interactive terminal detected."
-      echo "  Set PROXMOX_PASSWORD as an environment variable before running:"
-      echo "    export PROXMOX_PASSWORD='...'"
-      echo "    curl -fsSL ... | bash -s -- ..."
+# ── Credential validation per target type ──
+
+case "$TARGET_TYPE" in
+  proxmox)
+    if [ -n "$PROXMOX_TOKEN_ID" ] && [ -n "$PROXMOX_TOKEN_SECRET" ]; then
+      echo "→ Auth: Proxmox API token"
+    elif [ -n "$PROXMOX_USERNAME" ]; then
+      echo "→ Auth: Proxmox username/password (password will be prompted)"
+      if [ -z "$PROXMOX_PASSWORD" ]; then
+        if [ -t 0 ]; then
+          echo ""
+          read -s -p "  Enter Proxmox password for ${PROXMOX_USERNAME}: " PROXMOX_PASSWORD
+          echo ""
+        else
+          echo "  ⚠️  No interactive terminal detected."
+          echo "  Set PROXMOX_PASSWORD as an environment variable before running:"
+          echo "    export PROXMOX_PASSWORD='...'"
+          exit 1
+        fi
+      else
+        echo "  (using PROXMOX_PASSWORD from environment)"
+      fi
+      if [ -z "$PROXMOX_PASSWORD" ]; then
+        echo "Error: password cannot be empty"
+        exit 1
+      fi
+    elif [ -n "$PROXMOX_BASE_URL" ]; then
+      echo "Error: Proxmox URL provided but no auth credentials."
+      echo "  Use --proxmox-token-id and --proxmox-token-secret (recommended)"
+      echo "  Or  --proxmox-user to be prompted for a password"
       exit 1
     fi
-  else
-    echo "  (using PROXMOX_PASSWORD from environment)"
-  fi
-  if [ -z "$PROXMOX_PASSWORD" ]; then
-    echo "Error: password cannot be empty"
+    ;;
+
+  truenas)
+    if [ -z "$TRUENAS_URL" ]; then
+      echo "Error: --truenas-url is required for TrueNAS targets"
+      exit 1
+    fi
+    if [ -z "$TRUENAS_API_KEY" ]; then
+      echo "Error: --truenas-api-key is required for TrueNAS targets"
+      echo "  Generate one in TrueNAS: Settings → API Keys → Add"
+      exit 1
+    fi
+    echo "→ Auth: TrueNAS API key"
+    ;;
+
+  nutanix)
+    if [ -z "$NUTANIX_URL" ]; then
+      echo "Error: --nutanix-url is required for Nutanix targets"
+      exit 1
+    fi
+    if [ -z "$NUTANIX_USERNAME" ]; then
+      echo "Error: --nutanix-username is required for Nutanix targets"
+      exit 1
+    fi
+    # Prompt for password if not in environment
+    if [ -z "$NUTANIX_PASSWORD" ]; then
+      if [ -t 0 ]; then
+        echo "→ Auth: Nutanix username/password (password will be prompted)"
+        echo ""
+        read -s -p "  Enter Nutanix password for ${NUTANIX_USERNAME}: " NUTANIX_PASSWORD
+        echo ""
+      else
+        echo "  ⚠️  No interactive terminal detected."
+        echo "  Set NUTANIX_PASSWORD as an environment variable before running:"
+        echo "    export NUTANIX_PASSWORD='...'"
+        exit 1
+      fi
+    else
+      echo "→ Auth: Nutanix username/password (from environment)"
+    fi
+    if [ -z "$NUTANIX_PASSWORD" ]; then
+      echo "Error: password cannot be empty"
+      exit 1
+    fi
+    ;;
+
+  *)
+    echo "Error: unsupported --target-type '${TARGET_TYPE}'"
+    echo "  Supported: proxmox, truenas, nutanix"
     exit 1
-  fi
-elif [ -n "$PROXMOX_BASE_URL" ]; then
-  echo "Error: Proxmox URL provided but no auth credentials."
-  echo "  Use --proxmox-token-id and --proxmox-token-secret (recommended)"
-  echo "  Or  --proxmox-user to be prompted for a password"
-  exit 1
-fi
+    ;;
+esac
 
 # Detect architecture
 ARCH=$(uname -m)
@@ -134,7 +210,7 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo "         ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest"
   echo "    3. Or build from source:"
   echo "       git clone https://github.com/${REPO}.git"
-  echo "       cd forge-flow-friend/connector-agent"
+  echo "       cd forge-flow-friend"
   echo "       go build -o connector-agent ."
   echo ""
   exit 1
@@ -149,7 +225,7 @@ curl -fsSL -o "/tmp/${ASSET_NAME}" "$DOWNLOAD_URL" || {
   echo ""
   echo "Fallback — build from source:"
   echo "  git clone https://github.com/${REPO}.git"
-  echo "  cd forge-flow-friend/connector-agent"
+  echo "  cd forge-flow-friend"
   echo "  go build -o connector-agent ."
   exit 1
 }
@@ -178,11 +254,17 @@ sudo chmod 700 "$CONFIG_DIR"
 # Write environment file (secrets stored in file, never in CLI args or logs)
 cat <<EOF | sudo tee "${CONFIG_DIR}/connector.env" > /dev/null
 CONNECTOR_TOKEN=${CONNECTOR_TOKEN}
+TARGET_TYPE=${TARGET_TYPE}
 PROXMOX_BASE_URL=${PROXMOX_BASE_URL}
 PROXMOX_USERNAME=${PROXMOX_USERNAME}
 PROXMOX_PASSWORD=${PROXMOX_PASSWORD}
 PROXMOX_TOKEN_ID=${PROXMOX_TOKEN_ID}
 PROXMOX_TOKEN_SECRET=${PROXMOX_TOKEN_SECRET}
+TRUENAS_URL=${TRUENAS_URL}
+TRUENAS_API_KEY=${TRUENAS_API_KEY}
+NUTANIX_URL=${NUTANIX_URL}
+NUTANIX_USERNAME=${NUTANIX_USERNAME}
+NUTANIX_PASSWORD=${NUTANIX_PASSWORD}
 INSECURE_SKIP_VERIFY=${INSECURE_SKIP_VERIFY}
 POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS}
 EOF
@@ -193,7 +275,7 @@ sudo chown "$SERVICE_USER":"$SERVICE_USER" "${CONFIG_DIR}/connector.env"
 echo "→ Creating systemd service..."
 cat <<EOF | sudo tee /etc/systemd/system/forgeai-connector.service > /dev/null
 [Unit]
-Description=ForgeAI Local Connector
+Description=ForgeAI Local Connector (${TARGET_TYPE})
 After=network-online.target
 Wants=network-online.target
 
@@ -225,6 +307,7 @@ sudo systemctl start forgeai-connector
 
 echo ""
 echo "✅ ForgeAI Local Connector installed and running!"
+echo "   Target: ${TARGET_TYPE}"
 echo ""
 echo "Useful commands:"
 echo "  Status:    sudo systemctl status forgeai-connector"
