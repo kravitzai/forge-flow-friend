@@ -207,6 +207,24 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo "    2. Or use Docker instead (recommended):"
   echo "       docker run -d --name forgeai-connector \\"
   echo "         -e CONNECTOR_TOKEN='${CONNECTOR_TOKEN}' \\"
+  echo "         -e TARGET_TYPE='${TARGET_TYPE}' \\"
+  case "$TARGET_TYPE" in
+    proxmox)
+      [ -n "$PROXMOX_BASE_URL" ]     && echo "         -e PROXMOX_BASE_URL='${PROXMOX_BASE_URL}' \\"
+      [ -n "$PROXMOX_TOKEN_ID" ]     && echo "         -e PROXMOX_TOKEN_ID='${PROXMOX_TOKEN_ID}' \\"
+      [ -n "$PROXMOX_TOKEN_SECRET" ] && echo "         -e PROXMOX_TOKEN_SECRET='${PROXMOX_TOKEN_SECRET}' \\"
+      [ -n "$PROXMOX_USERNAME" ]     && echo "         -e PROXMOX_USERNAME='${PROXMOX_USERNAME}' \\"
+      ;;
+    truenas)
+      echo "         -e TRUENAS_URL='${TRUENAS_URL}' \\"
+      echo "         -e TRUENAS_API_KEY='${TRUENAS_API_KEY}' \\"
+      ;;
+    nutanix)
+      echo "         -e NUTANIX_URL='${NUTANIX_URL}' \\"
+      echo "         -e NUTANIX_USERNAME='${NUTANIX_USERNAME}' \\"
+      ;;
+  esac
+  [ "$INSECURE_SKIP_VERIFY" = "true" ] && echo "         -e INSECURE_SKIP_VERIFY=true \\"
   echo "         ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest"
   echo "    3. Or build from source:"
   echo "       git clone https://github.com/${REPO}.git"
