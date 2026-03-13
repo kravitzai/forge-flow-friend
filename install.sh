@@ -134,7 +134,7 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo "         ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest"
   echo "    3. Or build from source:"
   echo "       git clone https://github.com/${REPO}.git"
-  echo "       cd forge-flow-friend/connector-agent"
+  echo "       cd forge-flow-friend"
   echo "       go build -o connector-agent ."
   echo ""
   exit 1
@@ -149,7 +149,7 @@ curl -fsSL -o "/tmp/${ASSET_NAME}" "$DOWNLOAD_URL" || {
   echo ""
   echo "Fallback — build from source:"
   echo "  git clone https://github.com/${REPO}.git"
-  echo "  cd forge-flow-friend/connector-agent"
+  echo "  cd forge-flow-friend"
   echo "  go build -o connector-agent ."
   exit 1
 }
