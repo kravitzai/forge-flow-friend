@@ -1,0 +1,95 @@
+# ForgeAI Connector Agent — Build & Publish (Public Repo)
+# This workflow runs in the PUBLIC repo (kravitzai/forge-flow-friend)
+# where the connector source lives at the repo root.
+#
+# Triggers:
+#   - Push a tag like v0.1.0 to build + release
+#   - workflow_dispatch for manual builds
+
+name: Connector Publish
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Image tag override (default: sha-based)"
+        required: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ghcr.io/kravitzai/forge-flow-friend/connector-agent
+
+jobs:
+  # ── Docker image → GHCR ──
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix=
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/kravitzai/forge-flow-friend
+            org.opencontainers.image.description=ForgeAI Local Connector Agent
+            org.opencontainers.image.licenses=MIT
+
+  # ── Binary artifacts → GitHub Release ──
+  release-binaries:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build binary
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+          CGO_ENABLED: "0"
+        run: |
+          OUTNAME="connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}"
+          go build -ldflags="-s -w" -o "$OUTNAME" .
+          tar czf "${OUTNAME}.tar.gz" "$OUTNAME"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: connector-agent-*.tar.gz
