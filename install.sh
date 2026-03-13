@@ -5,7 +5,7 @@
 # it as a systemd service.
 #
 # Usage (recommended — API token auth):
-#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/connector-agent/install.sh \
 #     | bash -s -- \
 #     --token 'fgc_...' \
 #     --proxmox-url 'https://192.168.1.100:8006' \
@@ -134,7 +134,7 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo "         ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest"
   echo "    3. Or build from source:"
   echo "       git clone https://github.com/${REPO}.git"
-  echo "       cd forge-flow-friend"
+  echo "       cd forge-flow-friend/connector-agent"
   echo "       go build -o connector-agent ."
   echo ""
   exit 1
@@ -149,7 +149,7 @@ curl -fsSL -o "/tmp/${ASSET_NAME}" "$DOWNLOAD_URL" || {
   echo ""
   echo "Fallback — build from source:"
   echo "  git clone https://github.com/${REPO}.git"
-  echo "  cd forge-flow-friend"
+  echo "  cd forge-flow-friend/connector-agent"
   echo "  go build -o connector-agent ."
   exit 1
 }
