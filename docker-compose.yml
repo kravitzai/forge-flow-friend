@@ -1,36 +1,42 @@
-# ForgeAI Local Connector — Docker Compose Example
+# ForgeAI Connector Host — Docker Compose
 #
-# Auth: Proxmox API token (recommended)
-#   1. Create an API token in Proxmox: Datacenter → Permissions → API Tokens
-#   2. Set PROXMOX_TOKEN_SECRET below or via .env file
-#   3. Run: docker compose up -d
+# The Connector Host manages multiple targets from a single container.
+# On first run with env vars, it auto-migrates to the encrypted host model.
 #
-# Password auth (fallback):
-#   Comment out TOKEN_ID/TOKEN_SECRET, uncomment USERNAME/PASSWORD.
-#   Use a .env file or docker secrets — never hardcode passwords.
+# To add more targets later, update the host's encrypted configuration
+# at /etc/forgeai/ (mounted as a volume for persistence).
 
 services:
-  forgeai-connector:
+  forgeai-host:
     image: ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest
-    container_name: forgeai-connector
+    container_name: forgeai-host
     restart: unless-stopped
+    volumes:
+      # Persist encrypted host state across container restarts
+      - forgeai-config:/etc/forgeai
     environment:
       # Required: Your ForgeAI connector token (from /account/local-systems)
       CONNECTOR_TOKEN: "${CONNECTOR_TOKEN}"
 
-      # Required: Your Proxmox VE URL (accessible from this machine)
-      PROXMOX_BASE_URL: "https://192.168.1.100:8006"
+      # Initial target setup (auto-migrated to encrypted store on first run)
+      TARGET_TYPE: "${TARGET_TYPE:-proxmox}"
 
-      # Recommended: API token auth
-      PROXMOX_TOKEN_ID: "monitoring@pve!forgeai"
-      PROXMOX_TOKEN_SECRET: "${PROXMOX_TOKEN_SECRET}"
+      # === Proxmox ===
+      PROXMOX_BASE_URL: "${PROXMOX_BASE_URL:-}"
+      PROXMOX_TOKEN_ID: "${PROXMOX_TOKEN_ID:-}"
+      PROXMOX_TOKEN_SECRET: "${PROXMOX_TOKEN_SECRET:-}"
+      # PROXMOX_USERNAME: "${PROXMOX_USERNAME:-}"
+      # PROXMOX_PASSWORD: "${PROXMOX_PASSWORD:-}"
+      # PROXMOX_NODE: "${PROXMOX_NODE:-}"
 
-      # Fallback: Username/password (use .env file, not inline values)
-      # PROXMOX_USERNAME: "root@pam"
-      # PROXMOX_PASSWORD: "${PROXMOX_PASSWORD}"
+      # === TrueNAS ===
+      TRUENAS_URL: "${TRUENAS_URL:-}"
+      TRUENAS_API_KEY: "${TRUENAS_API_KEY:-}"
 
-      # Optional settings
-      # PROXMOX_NODE: "pve1"              # Limit to specific node
-      # POLL_INTERVAL_SECONDS: "30"        # Collection interval (default: 30)
-      INSECURE_SKIP_VERIFY: "true"         # Accept self-signed certs (common for Proxmox)
-      # LOG_LEVEL: "debug"
+      # === Common ===
+      INSECURE_SKIP_VERIFY: "${INSECURE_SKIP_VERIFY:-true}"
+      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-30}"
+
+volumes:
+  forgeai-config:
+    driver: local
