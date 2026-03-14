@@ -186,7 +186,11 @@ if [ -n "$TARGET_TYPE" ]; then
 
     *)
       echo "Error: unsupported --target-type '${TARGET_TYPE}'"
-      echo "  Supported: proxmox, truenas, nutanix"
+      echo "  Supported: proxmox, truenas, nutanix, prometheus, grafana, ollama,"
+      echo "             generic-http, pure-storage, netapp-ontap, powerstore, powermax, powerflex"
+      echo ""
+      echo "  Tip: Use --enroll-token instead of --token to enroll a multi-target host."
+      echo "  Targets are then assigned remotely from the ForgeAI dashboard."
       exit 1
       ;;
   esac
