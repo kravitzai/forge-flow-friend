@@ -5,7 +5,7 @@
 # it as a systemd service.
 #
 # Usage — Proxmox (API token auth):
-#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
+#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/connector-agent/install.sh \
 #     | bash -s -- \
 #     --token 'fgc_...' \
 #     --target-type 'proxmox' \

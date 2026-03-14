@@ -24,7 +24,7 @@ docker run -d --name forgeai-connector \
 ### Linux Service (install.sh)
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
+curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/connector-agent/install.sh \
   | bash -s -- \
   --token 'fgc_...' \
   --proxmox-url 'https://192.168.1.100:8006' \
