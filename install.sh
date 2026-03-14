@@ -6,7 +6,7 @@
 #
 # Usage — Enrollment (recommended):
 #   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
-#     | bash -s -- --enroll-token 'fgbt_...'
+#     | bash -s -- --enroll-token 'fgc_...'
 #
 # Usage — Enrollment + initial target:
 #   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
