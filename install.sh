@@ -317,11 +317,11 @@ PrivateTmp=true
 WantedBy=multi-user.target
 EOF
 
-# Enable and start
+# Enable and start (use restart to pick up new config if already running)
 echo "→ Starting connector..."
 sudo systemctl daemon-reload
 sudo systemctl enable forgeai-connector
-sudo systemctl start forgeai-connector
+sudo systemctl restart forgeai-connector
 
 echo ""
 echo "✅ ForgeAI Local Connector installed and running!"
