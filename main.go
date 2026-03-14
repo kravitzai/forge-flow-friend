@@ -89,9 +89,11 @@ func main() {
 	}
 
 	log.Printf("[host] Active workers: %d", supervisor.WorkerCount())
+	// Set up signal channel early for use by update goroutine
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
 	// ── Desired-State Sync Loop ──
-	// Only start if the host is enrolled with a valid connector token
 	var syncManager *SyncManager
 	if token := supervisor.GetConnectorToken(); token != "" {
 		syncInterval := 60 * time.Second
@@ -107,9 +109,64 @@ func main() {
 		log.Printf("[host] Enroll the host to enable remote management")
 	}
 
+	// ── Update Manager ──
+	var updateManager *UpdateManager
+	updateMgr, err := NewUpdateManager(store, backend, supervisor, configDir)
+	if err != nil {
+		log.Printf("[host] WARNING: Update manager init failed: %v", err)
+	} else {
+		updateManager = updateMgr
+
+		// Check for pending rollback from a previous failed update
+		if updateManager.CheckRollbackNeeded() {
+			log.Printf("[host] Pending rollback detected — initiating automatic rollback")
+			if err := updateManager.Rollback(); err != nil {
+				log.Printf("[host] WARNING: Rollback failed: %v", err)
+			}
+		} else {
+			// Confirm health if this is a new version that just started
+			updateManager.ConfirmHealth()
+		}
+
+		// Start periodic update checks if policy allows
+		hostState := supervisor.GetState()
+		updatePolicy := UpdatePolicy("none")
+		if hostState != nil && hostState.Update.UpdatePolicy != "" {
+			updatePolicy = UpdatePolicy(hostState.Update.UpdatePolicy)
+		}
+
+		if updatePolicy != UpdatePolicyNone {
+			go func() {
+				checkInterval := 6 * time.Hour
+				ticker := time.NewTicker(checkInterval)
+				defer ticker.Stop()
+
+				for {
+					select {
+					case <-sigCh:
+						return
+					case <-ticker.C:
+						manifest, err := updateManager.CheckForUpdate(updatePolicy)
+						if err != nil {
+							log.Printf("[updater] Update check error: %v", err)
+							continue
+						}
+						if manifest != nil {
+							log.Printf("[updater] Update available: %s (channel: %s)", manifest.Version, manifest.Channel)
+							if err := updateManager.StageUpdate(manifest); err != nil {
+								log.Printf("[updater] Stage failed: %v", err)
+							}
+						}
+					}
+				}
+			}()
+			log.Printf("[host] Update checks enabled (policy: %s)", updatePolicy)
+		} else {
+			log.Printf("[host] Auto-updates disabled (policy: none)")
+		}
+	}
+
 	// Wait for shutdown signal
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 
 	log.Printf("[host] Received %v, shutting down gracefully...", sig)
@@ -117,7 +174,12 @@ func main() {
 	if syncManager != nil {
 		syncManager.Stop()
 	}
-	supervisor.Shutdown()
+	if updateManager != nil {
+		// Drain workers before potential update apply
+		updateManager.DrainWorkers(10 * time.Second)
+	} else {
+		supervisor.Shutdown()
+	}
 	log.Printf("[host] Shutdown complete")
 }
 
