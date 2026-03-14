@@ -19,11 +19,13 @@ COPY --from=builder /build/connector-agent /usr/local/bin/connector-agent
 LABEL org.opencontainers.image.source="https://github.com/kravitzai/forge-flow-friend"
 LABEL org.opencontainers.image.description="ForgeAI Connector Host — Multi-Target Agent"
 
-# Non-root user
-RUN adduser -D -u 1000 forgeai
-RUN mkdir -p /etc/forgeai/secrets && chown -R forgeai:forgeai /etc/forgeai
+# Non-root user + config directory
+# Create dirs BEFORE declaring VOLUME so ownership is baked into the image layer.
+# When Docker initializes an empty named volume it copies this layer's contents/perms.
+RUN adduser -D -u 1000 forgeai \
+ && mkdir -p /etc/forgeai/secrets \
+ && chown -R forgeai:forgeai /etc/forgeai
 
-# Config volume
 VOLUME /etc/forgeai
 
 USER forgeai
