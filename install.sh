@@ -4,22 +4,31 @@
 # Installs the connector host as a systemd service that can manage
 # multiple infrastructure targets simultaneously.
 #
-# Usage — Single target (legacy compatible):
+# Usage — Enrollment (recommended):
+#   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
+#     | bash -s -- --enroll-token 'fgbt_...'
+#
+# Usage — Enrollment + initial target:
 #   curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
 #     | bash -s -- \
-#     --token 'fgc_...' \
+#     --enroll-token 'fgbt_...' \
 #     --target-type 'proxmox' \
 #     --proxmox-url 'https://192.168.1.100:8006' \
 #     --proxmox-token-id 'monitoring@pve!forgeai' \
 #     --proxmox-token-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
+#
+# Usage — Legacy mode (backward compatible):
+#   curl -fsSL ... | bash -s -- --token 'fgc_...' --target-type 'proxmox' ...
 #
 # The host supports adding more targets later without reinstalling.
 
 set -euo pipefail
 
 REPO="kravitzai/forge-flow-friend"
+ENROLLMENT_TOKEN=""
 CONNECTOR_TOKEN=""
 TARGET_TYPE=""
+HOST_LABEL=""
 
 # Proxmox
 PROXMOX_BASE_URL=""
@@ -46,8 +55,10 @@ SERVICE_USER="forgeai"
 # Parse arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
+    --enroll-token)         ENROLLMENT_TOKEN="$2";      shift 2 ;;
     --token)                CONNECTOR_TOKEN="$2";       shift 2 ;;
     --target-type)          TARGET_TYPE="$2";           shift 2 ;;
+    --label)                HOST_LABEL="$2";            shift 2 ;;
     --proxmox-url)          PROXMOX_BASE_URL="$2";      shift 2 ;;
     --proxmox-user)         PROXMOX_USERNAME="$2";      shift 2 ;;
     --proxmox-token-id)     PROXMOX_TOKEN_ID="$2";      shift 2 ;;
@@ -63,8 +74,12 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [ -z "$CONNECTOR_TOKEN" ]; then
-  echo "Error: --token is required"
+# Require at least one auth token
+if [ -z "$ENROLLMENT_TOKEN" ] && [ -z "$CONNECTOR_TOKEN" ]; then
+  echo "Error: --enroll-token (recommended) or --token (legacy) is required"
+  echo ""
+  echo "  Enrollment mode:  --enroll-token 'fgbt_...'"
+  echo "  Legacy mode:      --token 'fgc_...' --target-type 'proxmox' ..."
   exit 1
 fi
 
@@ -72,6 +87,12 @@ echo "╔═══════════════════════�
 echo "║  ForgeAI Connector Host — Installer      ║"
 echo "╚══════════════════════════════════════════╝"
 echo ""
+
+if [ -n "$ENROLLMENT_TOKEN" ]; then
+  echo "→ Mode: Host enrollment"
+else
+  echo "→ Mode: Legacy single-target"
+fi
 
 # ── Check for existing installation ──
 
@@ -200,7 +221,11 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo "  Fallback — use Docker:"
   echo "    docker run -d --name forgeai-host \\"
   echo "      -v /etc/forgeai:/etc/forgeai \\"
-  echo "      -e CONNECTOR_TOKEN='${CONNECTOR_TOKEN}' \\"
+  if [ -n "$ENROLLMENT_TOKEN" ]; then
+    echo "      -e FORGEAI_ENROLLMENT_TOKEN='${ENROLLMENT_TOKEN}' \\"
+  else
+    echo "      -e CONNECTOR_TOKEN='${CONNECTOR_TOKEN}' \\"
+  fi
   [ -n "$TARGET_TYPE" ] && echo "      -e TARGET_TYPE='${TARGET_TYPE}' \\"
   case "$TARGET_TYPE" in
     proxmox)
@@ -263,11 +288,40 @@ sudo chmod 700 "${CONFIG_DIR}"
 sudo chmod 700 "${CONFIG_DIR}/secrets"
 sudo chown -R "$SERVICE_USER":"$SERVICE_USER" "${CONFIG_DIR}"
 
-# Write environment file (only for initial target setup via env vars)
-# The host will migrate these to its encrypted store on first run.
-if [ -n "$TARGET_TYPE" ] && [ "$EXISTING_INSTALL" = false ]; then
-  echo "→ Writing initial target configuration..."
-  cat <<EOF | sudo tee "${CONFIG_DIR}/connector.env" > /dev/null
+# Write environment file
+if [ "$EXISTING_INSTALL" = false ]; then
+  echo "→ Writing configuration..."
+
+  if [ -n "$ENROLLMENT_TOKEN" ]; then
+    # Enrollment mode — minimal env, host enrolls on first run
+    cat <<EOF | sudo tee "${CONFIG_DIR}/connector.env" > /dev/null
+FORGEAI_ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
+CONFIG_DIR=${CONFIG_DIR}
+HOST_LABEL=${HOST_LABEL}
+EOF
+
+    # If initial target provided, also include legacy vars for migration
+    if [ -n "$TARGET_TYPE" ]; then
+      cat <<EOF | sudo tee -a "${CONFIG_DIR}/connector.env" > /dev/null
+CONNECTOR_TOKEN=${ENROLLMENT_TOKEN}
+TARGET_TYPE=${TARGET_TYPE}
+PROXMOX_BASE_URL=${PROXMOX_BASE_URL}
+PROXMOX_USERNAME=${PROXMOX_USERNAME}
+PROXMOX_PASSWORD=${PROXMOX_PASSWORD}
+PROXMOX_TOKEN_ID=${PROXMOX_TOKEN_ID}
+PROXMOX_TOKEN_SECRET=${PROXMOX_TOKEN_SECRET}
+TRUENAS_URL=${TRUENAS_URL}
+TRUENAS_API_KEY=${TRUENAS_API_KEY}
+NUTANIX_URL=${NUTANIX_URL}
+NUTANIX_USERNAME=${NUTANIX_USERNAME}
+NUTANIX_PASSWORD=${NUTANIX_PASSWORD}
+INSECURE_SKIP_VERIFY=${INSECURE_SKIP_VERIFY}
+POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS}
+EOF
+    fi
+  else
+    # Legacy mode
+    cat <<EOF | sudo tee "${CONFIG_DIR}/connector.env" > /dev/null
 CONNECTOR_TOKEN=${CONNECTOR_TOKEN}
 TARGET_TYPE=${TARGET_TYPE}
 CONFIG_DIR=${CONFIG_DIR}
@@ -284,24 +338,15 @@ NUTANIX_PASSWORD=${NUTANIX_PASSWORD}
 INSECURE_SKIP_VERIFY=${INSECURE_SKIP_VERIFY}
 POLL_INTERVAL_SECONDS=${POLL_INTERVAL_SECONDS}
 EOF
+  fi
+
   sudo chmod 600 "${CONFIG_DIR}/connector.env"
   sudo chown "$SERVICE_USER":"$SERVICE_USER" "${CONFIG_DIR}/connector.env"
 else
-  # Existing install: just update the token if provided, preserve everything else
-  if [ -f "${CONFIG_DIR}/connector.env" ]; then
-    echo "→ Preserving existing configuration"
-  else
-    echo "→ Writing minimal configuration..."
-    cat <<EOF | sudo tee "${CONFIG_DIR}/connector.env" > /dev/null
-CONNECTOR_TOKEN=${CONNECTOR_TOKEN}
-CONFIG_DIR=${CONFIG_DIR}
-EOF
-    sudo chmod 600 "${CONFIG_DIR}/connector.env"
-    sudo chown "$SERVICE_USER":"$SERVICE_USER" "${CONFIG_DIR}/connector.env"
-  fi
+  echo "→ Preserving existing configuration"
 fi
 
-# Create systemd unit (host model — no longer tied to one target type)
+# Create systemd unit
 echo "→ Creating systemd service..."
 cat <<EOF | sudo tee /etc/systemd/system/forgeai-host.service > /dev/null
 [Unit]
@@ -346,6 +391,9 @@ sudo systemctl restart forgeai-host
 
 echo ""
 echo "✅ ForgeAI Connector Host installed and running!"
+if [ -n "$ENROLLMENT_TOKEN" ]; then
+  echo "   Mode: Enrollment (host will self-register with backend)"
+fi
 if [ -n "$TARGET_TYPE" ]; then
   echo "   Initial target: ${TARGET_TYPE}"
 fi
@@ -357,5 +405,5 @@ echo "  Logs:      sudo journalctl -u forgeai-host -f"
 echo "  Stop:      sudo systemctl stop forgeai-host"
 echo "  Uninstall: sudo systemctl stop forgeai-host && sudo systemctl disable forgeai-host && sudo rm ${INSTALL_DIR}/forgeai-host /etc/systemd/system/forgeai-host.service && sudo rm -rf ${CONFIG_DIR}"
 echo ""
-echo "To add more targets, update the host configuration and restart:"
-echo "  sudo systemctl restart forgeai-host"
+echo "After enrollment, targets are managed from the ForgeAI dashboard."
+echo "No reinstall needed to add, update, or remove targets."

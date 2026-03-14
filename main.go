@@ -2,13 +2,15 @@
 //
 // The Connector Host is a long-running supervisor process that manages
 // per-target workers. It supports:
+//   - Secure host enrollment with bootstrap token
+//   - Desired-state sync from ForgeAI backend
 //   - Multiple concurrent targets (proxmox, truenas, etc.)
 //   - Independent worker lifecycle per target
 //   - Encrypted local config/secret storage
 //   - Legacy single-target env-var mode for backward compatibility
 //
-// Usage (Host mode — multi-target):
-//   ./connector-agent --config-dir /etc/forgeai
+// Usage (Enrollment — recommended):
+//   FORGEAI_ENROLLMENT_TOKEN=fgbt_... ./connector-agent
 //
 // Usage (Legacy mode — single target via env vars):
 //   CONNECTOR_TOKEN=fgc_... TARGET_TYPE=proxmox PROXMOX_BASE_URL=... ./connector-agent
@@ -22,6 +24,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 func main() {
@@ -39,13 +42,10 @@ func main() {
 		log.Fatalf("[store] Initialization failed: %v", err)
 	}
 
-	// Detect mode: check if there's existing host state, or fall back to legacy env
-	legacyCfg := detectLegacyEnvConfig()
-
-	// Initialize backend client
+	// Determine backend URL
 	backendURL := os.Getenv("BACKEND_URL")
-	if backendURL == "" && legacyCfg != nil {
-		backendURL = legacyCfg.BackendURL
+	if backendURL == "" {
+		backendURL = defaultBackendBase
 	}
 	backend := NewBackendClient(backendURL)
 
@@ -56,9 +56,29 @@ func main() {
 	supervisor.RegisterAdapter("proxmox", NewProxmoxAdapter)
 	supervisor.RegisterAdapter("truenas", NewTrueNASAdapter)
 
-	// Initialize (loads state or migrates legacy config)
-	if err := supervisor.Initialize(legacyCfg); err != nil {
-		log.Fatalf("[supervisor] Initialization failed: %v", err)
+	// ── Enrollment / State Loading ──
+	// Priority:
+	//   1. Existing enrolled state (host.json.enc)
+	//   2. Enrollment via FORGEAI_ENROLLMENT_TOKEN
+	//   3. Legacy env-var migration (CONNECTOR_TOKEN + TARGET_TYPE)
+	//   4. Bare enrollment via CONNECTOR_TOKEN (no target type = enroll-only)
+
+	enrollmentToken := os.Getenv("FORGEAI_ENROLLMENT_TOKEN")
+	legacyCfg := detectLegacyEnvConfig()
+
+	if enrollmentToken != "" {
+		// Enrollment flow
+		state, err := MustEnroll(store, backendURL)
+		if err != nil {
+			log.Fatalf("[enrollment] %v", err)
+		}
+		supervisor.InitializeWithState(state)
+		log.Printf("[host] Enrolled host: %s (%s)", state.Identity.Label, state.Identity.HostID[:12])
+	} else {
+		// Legacy / existing state flow
+		if err := supervisor.Initialize(legacyCfg); err != nil {
+			log.Fatalf("[supervisor] Initialization failed: %v", err)
+		}
 	}
 
 	log.Printf("[host] Configured targets: %d", supervisor.TargetCount())
@@ -70,22 +90,47 @@ func main() {
 
 	log.Printf("[host] Active workers: %d", supervisor.WorkerCount())
 
+	// ── Desired-State Sync Loop ──
+	// Only start if the host is enrolled with a valid connector token
+	var syncManager *SyncManager
+	if token := supervisor.GetConnectorToken(); token != "" {
+		syncInterval := 60 * time.Second
+		if state := supervisor.GetState(); state != nil && state.Config.SyncIntervalSecs > 0 {
+			syncInterval = time.Duration(state.Config.SyncIntervalSecs) * time.Second
+		}
+
+		syncManager = NewSyncManager(backend, store, supervisor)
+		syncManager.Start(syncInterval)
+		log.Printf("[host] Desired-state sync enabled (interval: %v)", syncInterval)
+	} else {
+		log.Printf("[host] No connector token — desired-state sync disabled")
+		log.Printf("[host] Enroll the host to enable remote management")
+	}
+
 	// Wait for shutdown signal
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	sig := <-sigCh
 
 	log.Printf("[host] Received %v, shutting down gracefully...", sig)
+
+	if syncManager != nil {
+		syncManager.Stop()
+	}
 	supervisor.Shutdown()
 	log.Printf("[host] Shutdown complete")
 }
 
 // detectLegacyEnvConfig checks for the old single-target environment
 // variable configuration and returns a Config if found.
-// Returns nil if no legacy config is detected.
 func detectLegacyEnvConfig() *Config {
 	token := os.Getenv("CONNECTOR_TOKEN")
 	if token == "" {
+		return nil
+	}
+
+	// If FORGEAI_ENROLLMENT_TOKEN is set, don't treat CONNECTOR_TOKEN as legacy
+	if os.Getenv("FORGEAI_ENROLLMENT_TOKEN") != "" {
 		return nil
 	}
 
@@ -95,29 +140,27 @@ func detectLegacyEnvConfig() *Config {
 
 	targetType := strings.ToLower(os.Getenv("TARGET_TYPE"))
 	if targetType == "" {
-		targetType = "proxmox"
+		// No target type = just a token for enrollment, not legacy mode
+		return nil
 	}
 
 	c := &Config{
-		ConnectorToken:     token,
-		BackendURL:         os.Getenv("BACKEND_URL"),
-		TargetType:         targetType,
-
-		ProxmoxBaseURL:     strings.TrimRight(os.Getenv("PROXMOX_BASE_URL"), "/"),
-		ProxmoxUsername:    os.Getenv("PROXMOX_USERNAME"),
-		ProxmoxPassword:   os.Getenv("PROXMOX_PASSWORD"),
-		ProxmoxTokenID:    os.Getenv("PROXMOX_TOKEN_ID"),
+		ConnectorToken:      token,
+		BackendURL:          os.Getenv("BACKEND_URL"),
+		TargetType:          targetType,
+		ProxmoxBaseURL:      strings.TrimRight(os.Getenv("PROXMOX_BASE_URL"), "/"),
+		ProxmoxUsername:     os.Getenv("PROXMOX_USERNAME"),
+		ProxmoxPassword:    os.Getenv("PROXMOX_PASSWORD"),
+		ProxmoxTokenID:     os.Getenv("PROXMOX_TOKEN_ID"),
 		ProxmoxTokenSecret: os.Getenv("PROXMOX_TOKEN_SECRET"),
-		ProxmoxNode:       os.Getenv("PROXMOX_NODE"),
-
-		TrueNASURL:    strings.TrimRight(os.Getenv("TRUENAS_URL"), "/"),
-		TrueNASAPIKey: os.Getenv("TRUENAS_API_KEY"),
-
-		LogLevel: os.Getenv("LOG_LEVEL"),
+		ProxmoxNode:        os.Getenv("PROXMOX_NODE"),
+		TrueNASURL:         strings.TrimRight(os.Getenv("TRUENAS_URL"), "/"),
+		TrueNASAPIKey:      os.Getenv("TRUENAS_API_KEY"),
+		LogLevel:           os.Getenv("LOG_LEVEL"),
 	}
 
 	if c.BackendURL == "" {
-		c.BackendURL = defaultBackendEndpoint
+		c.BackendURL = defaultBackendBase + defaultHeartbeatPath
 	}
 
 	c.PollIntervalSecs = 30
@@ -131,7 +174,6 @@ func detectLegacyEnvConfig() *Config {
 		c.InsecureSkipVerify = true
 	}
 
-	// Validate basic requirements per target type
 	switch targetType {
 	case "proxmox":
 		if c.ProxmoxBaseURL == "" {
@@ -152,7 +194,6 @@ func detectLegacyEnvConfig() *Config {
 
 	log.Printf("[config] Legacy env config detected: target_type=%s", targetType)
 
-	// Only print non-secret config
 	switch targetType {
 	case "proxmox":
 		log.Printf("[config] Proxmox URL: %s", c.ProxmoxBaseURL)
