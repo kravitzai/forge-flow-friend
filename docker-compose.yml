@@ -1,41 +1,23 @@
 # ForgeAI Connector Host — Docker Compose
 #
 # The Connector Host manages multiple targets from a single container.
-# On first run with env vars, it auto-migrates to the encrypted host model.
+# Enroll with a token, then assign targets from the ForgeAI dashboard.
 #
-# To add more targets later, update the host's encrypted configuration
-# at /etc/forgeai/ (mounted as a volume for persistence).
+# Usage:
+#   FORGEAI_ENROLLMENT_TOKEN=fgbt_... docker compose up -d
 
 services:
   forgeai-host:
     image: ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest
+    pull_policy: always
     container_name: forgeai-host
     restart: unless-stopped
     volumes:
       # Persist encrypted host state across container restarts
       - forgeai-config:/etc/forgeai
     environment:
-      # Required: Your ForgeAI connector token (from /account/local-systems)
-      CONNECTOR_TOKEN: "${CONNECTOR_TOKEN}"
-
-      # Initial target setup (auto-migrated to encrypted store on first run)
-      TARGET_TYPE: "${TARGET_TYPE:-proxmox}"
-
-      # === Proxmox ===
-      PROXMOX_BASE_URL: "${PROXMOX_BASE_URL:-}"
-      PROXMOX_TOKEN_ID: "${PROXMOX_TOKEN_ID:-}"
-      PROXMOX_TOKEN_SECRET: "${PROXMOX_TOKEN_SECRET:-}"
-      # PROXMOX_USERNAME: "${PROXMOX_USERNAME:-}"
-      # PROXMOX_PASSWORD: "${PROXMOX_PASSWORD:-}"
-      # PROXMOX_NODE: "${PROXMOX_NODE:-}"
-
-      # === TrueNAS ===
-      TRUENAS_URL: "${TRUENAS_URL:-}"
-      TRUENAS_API_KEY: "${TRUENAS_API_KEY:-}"
-
-      # === Common ===
-      INSECURE_SKIP_VERIFY: "${INSECURE_SKIP_VERIFY:-true}"
-      POLL_INTERVAL_SECONDS: "${POLL_INTERVAL_SECONDS:-30}"
+      # Required: Enrollment token from /account/local-systems
+      FORGEAI_ENROLLMENT_TOKEN: "${FORGEAI_ENROLLMENT_TOKEN}"
 
 volumes:
   forgeai-config:

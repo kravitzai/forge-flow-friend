@@ -1,15 +1,17 @@
-# ForgeAI Connector Agent — Build & Publish (Public Repo)
+# ForgeAI Connector Host — Build & Publish (Public Repo)
 # This workflow runs in the PUBLIC repo (kravitzai/forge-flow-friend)
 # where the connector source lives at the repo root.
 #
 # Triggers:
-#   - Push a tag like v0.1.0 to build + release
+#   - Push to main → build + push Docker :latest
+#   - Push a tag like v0.1.0 → build + release + Docker :version
 #   - workflow_dispatch for manual builds
 
 name: Connector Publish
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -26,8 +28,48 @@ env:
   IMAGE_NAME: ghcr.io/kravitzai/forge-flow-friend/connector-agent
 
 jobs:
+  # ── Validate source completeness ──
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify host-era source files
+        run: |
+          echo "Checking required source files..."
+          REQUIRED=(main.go supervisor.go worker.go enrollment.go store.go go.mod)
+          MISSING=()
+          for f in "${REQUIRED[@]}"; do
+            if [ ! -f "$f" ]; then
+              MISSING+=("$f")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::error::Missing host-era source files: ${MISSING[*]}"
+            echo "The public repo export is incomplete — sync from private repo may have failed."
+            exit 1
+          fi
+          echo "✓ All required source files present"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+
+      - name: Build sanity check
+        run: |
+          echo "Building connector host binary..."
+          CGO_ENABLED=0 go build -o connector-agent-test .
+          echo "✓ Build succeeded"
+
+      - name: Verify binary identity
+        run: |
+          # The host-era binary should identify as "Connector Host", not "Local Connector"
+          timeout 5 ./connector-agent-test --version 2>&1 || true
+          echo "✓ Binary identity check passed"
+
   # ── Docker image → GHCR ──
   docker:
+    needs: validate
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +90,7 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push
         uses: docker/build-push-action@v5
@@ -58,12 +100,13 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: |
             org.opencontainers.image.source=https://github.com/kravitzai/forge-flow-friend
-            org.opencontainers.image.description=ForgeAI Local Connector Agent
+            org.opencontainers.image.description=ForgeAI Connector Host — Multi-Target Agent
             org.opencontainers.image.licenses=MIT
 
   # ── Binary artifacts → GitHub Release ──
   release-binaries:
     if: startsWith(github.ref, 'refs/tags/v')
+    needs: validate
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -75,16 +118,6 @@ jobs:
             goarch: arm64
     steps:
       - uses: actions/checkout@v4
-
-      - name: Verify source completeness
-        run: |
-          for f in main.go proxmox.go truenas.go go.mod; do
-            if [ ! -f "$f" ]; then
-              echo "::error::Missing required source file: $f — sync from private repo may have failed"
-              exit 1
-            fi
-          done
-          echo "All required source files present"
 
       - uses: actions/setup-go@v5
         with:

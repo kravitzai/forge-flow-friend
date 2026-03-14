@@ -224,6 +224,7 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo ""
   echo "  Fallback — use Docker:"
   echo "    docker run -d --name forgeai-host \\"
+  echo "      --pull always \\"
   echo "      -v /etc/forgeai:/etc/forgeai \\"
   if [ -n "$ENROLLMENT_TOKEN" ]; then
     echo "      -e FORGEAI_ENROLLMENT_TOKEN='${ENROLLMENT_TOKEN}' \\"
