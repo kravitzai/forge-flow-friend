@@ -60,6 +60,11 @@ func main() {
 	supervisor.RegisterAdapter("grafana", NewGrafanaAdapter)
 	supervisor.RegisterAdapter("ollama", NewOllamaAdapter)
 	supervisor.RegisterAdapter("generic-http", NewGenericHTTPAdapter)
+	supervisor.RegisterAdapter("pure-storage", NewPureStorageAdapter)
+	supervisor.RegisterAdapter("netapp-ontap", NewNetAppONTAPAdapter)
+	supervisor.RegisterAdapter("powerstore", NewPowerStoreAdapter)
+	supervisor.RegisterAdapter("powermax", NewPowerMaxAdapter)
+	supervisor.RegisterAdapter("powerflex", NewPowerFlexAdapter)
 
 	// ── Enrollment / State Loading ──
 	// Priority:
