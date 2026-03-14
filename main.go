@@ -52,9 +52,14 @@ func main() {
 	// Create supervisor
 	supervisor := NewSupervisor(store, backend)
 
-	// Register available adapters
+	// Register available adapters — built-in only, no dynamic plugins
 	supervisor.RegisterAdapter("proxmox", NewProxmoxAdapter)
 	supervisor.RegisterAdapter("truenas", NewTrueNASAdapter)
+	supervisor.RegisterAdapter("nutanix", NewNutanixAdapter)
+	supervisor.RegisterAdapter("prometheus", NewPrometheusAdapter)
+	supervisor.RegisterAdapter("grafana", NewGrafanaAdapter)
+	supervisor.RegisterAdapter("ollama", NewOllamaAdapter)
+	supervisor.RegisterAdapter("generic-http", NewGenericHTTPAdapter)
 
 	// ── Enrollment / State Loading ──
 	// Priority:
