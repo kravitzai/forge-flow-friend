@@ -66,6 +66,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - goos: linux
@@ -74,6 +75,16 @@ jobs:
             goarch: arm64
     steps:
       - uses: actions/checkout@v4
+
+      - name: Verify source completeness
+        run: |
+          for f in main.go proxmox.go truenas.go go.mod; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing required source file: $f — sync from private repo may have failed"
+              exit 1
+            fi
+          done
+          echo "All required source files present"
 
       - uses: actions/setup-go@v5
         with:
