@@ -66,24 +66,20 @@ func NewWorker(cfg WorkerConfig) *Worker {
 }
 
 // Start begins the worker's collection loop.
+// NOTE: Start must NOT call notifyStateChange synchronously — the caller
+// (supervisor.startWorkerLocked) holds a mutex that the callback re-enters.
+// The Running transition is emitted from the run() goroutine after init.
 func (w *Worker) Start() error {
 	w.mu.Lock()
 	if w.state.Status == WorkerStatusRunning {
 		w.mu.Unlock()
 		return fmt.Errorf("worker %s already running", w.profile.TargetID)
 	}
-	w.state.Status = WorkerStatusRunning
+	// Mark as starting (not yet Running — that happens after init succeeds)
+	w.state.Status = WorkerStatusStarting
 	w.state.StartedAt = time.Now()
 	w.state.ConsecutiveErrors = 0
 	w.mu.Unlock()
-
-	w.notifyStateChange(WorkerStatusRunning)
-
-	// Initialize adapter
-	if err := w.adapter.Init(w.profile, w.creds); err != nil {
-		w.setStatus(WorkerStatusFailed)
-		return fmt.Errorf("adapter init for %s: %w", w.profile.Name, err)
-	}
 
 	go w.run()
 	return nil
@@ -124,9 +120,22 @@ func (w *Worker) State() WorkerState {
 	return w.state
 }
 
-// run is the main collection loop.
+// run is the main collection loop. It initializes the adapter first,
+// and only transitions to Running after init succeeds.
 func (w *Worker) run() {
 	defer close(w.done)
+
+	// Initialize adapter inside the goroutine so the supervisor lock is
+	// not held during this call (and its state-change callback).
+	if err := w.adapter.Init(w.profile, w.creds); err != nil {
+		log.Printf("[worker:%s] Adapter init failed: %v", w.profile.Name, err)
+		w.setStatus(WorkerStatusFailed)
+		return
+	}
+
+	// Adapter initialized — now we are truly Running.
+	w.setStatus(WorkerStatusRunning)
+	log.Printf("[worker:%s] Worker running", w.profile.Name)
 
 	interval := time.Duration(w.profile.PollIntervalSecs) * time.Second
 	if interval < 10*time.Second {

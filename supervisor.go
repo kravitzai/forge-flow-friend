@@ -231,25 +231,30 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 }
 
 // onWorkerStateChange handles worker status transitions.
+// This may be called from worker goroutines OR from the supervisor's own
+// Reconcile path (via Stop/Pause). To avoid deadlock when the supervisor
+// lock is already held, we dispatch asynchronously.
 func (s *Supervisor) onWorkerStateChange(targetID string, status WorkerStatus) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	go func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
 
-	for i := range s.state.Targets {
-		if s.state.Targets[i].TargetID == targetID {
-			switch status {
-			case WorkerStatusDegraded:
-				s.state.Targets[i].Status = TargetStatusDegraded
-			case WorkerStatusRunning:
-				s.state.Targets[i].Status = TargetStatusActive
-			case WorkerStatusStopped:
-				s.state.Targets[i].Status = TargetStatusPaused
-			case WorkerStatusFailed:
-				s.state.Targets[i].Status = TargetStatusError
+		for i := range s.state.Targets {
+			if s.state.Targets[i].TargetID == targetID {
+				switch status {
+				case WorkerStatusDegraded:
+					s.state.Targets[i].Status = TargetStatusDegraded
+				case WorkerStatusRunning:
+					s.state.Targets[i].Status = TargetStatusActive
+				case WorkerStatusStopped:
+					s.state.Targets[i].Status = TargetStatusPaused
+				case WorkerStatusFailed:
+					s.state.Targets[i].Status = TargetStatusError
+				}
+				break
 			}
-			break
 		}
-	}
+	}()
 }
 
 // AddTarget adds a new target profile and triggers reconciliation.

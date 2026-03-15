@@ -145,6 +145,7 @@ type WorkerStatus string
 
 const (
 	WorkerStatusIdle     WorkerStatus = "idle"
+	WorkerStatusStarting WorkerStatus = "starting"
 	WorkerStatusRunning  WorkerStatus = "running"
 	WorkerStatusStopped  WorkerStatus = "stopped"
 	WorkerStatusDegraded WorkerStatus = "degraded"
