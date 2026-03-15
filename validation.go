@@ -65,7 +65,7 @@ var targetAuthRegistry = map[string]TargetAuthSpec{
 	"truenas": {
 		TargetType:       "truenas",
 		AllowedAuthTypes: []AuthType{AuthTypeAPIToken},
-		RequiredCredKeys: []string{"api_key"},
+		RequiredCredKeys: []string{"api_token"},
 		DefaultMode:      ProfileModeReadOnly,
 		Description:      "TrueNAS SCALE/CORE storage",
 	},

@@ -129,7 +129,12 @@ func NewTrueNASClient(cfg *Config) *TrueNASClient {
 
 // apiGet makes an authenticated GET to the TrueNAS REST API
 func (t *TrueNASClient) apiGet(path string) (json.RawMessage, error) {
-	url := strings.TrimRight(t.cfg.TrueNASURL, "/") + "/api/v2.0" + path
+	base := strings.TrimRight(t.cfg.TrueNASURL, "/")
+	// Avoid double-prefixing if endpoint already includes /api/v2.0
+	if !strings.Contains(base, "/api/v2.0") {
+		base += "/api/v2.0"
+	}
+	url := base + path
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err

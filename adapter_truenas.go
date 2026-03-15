@@ -29,9 +29,13 @@ func (a *TrueNASAdapter) Init(profile *TargetProfile, creds map[string]string) e
 		PollIntervalSecs:   profile.PollIntervalSecs,
 	}
 
-	// Extract credentials
-	if v, ok := creds["api_key"]; ok {
+	// Extract credentials — UI stores as "api_token", legacy uses "api_key"
+	if v, ok := creds["api_token"]; ok && v != "" {
 		cfg.TrueNASAPIKey = v
+	} else if v, ok := creds["api_key"]; ok && v != "" {
+		cfg.TrueNASAPIKey = v
+	} else {
+		return fmt.Errorf("missing TrueNAS API token — expected credential key 'api_token' (or legacy 'api_key')")
 	}
 
 	a.cfg = cfg
