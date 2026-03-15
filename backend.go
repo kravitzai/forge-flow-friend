@@ -143,6 +143,7 @@ type AckPayload struct {
 	Status         string                     `json:"status"`          // applied, partial, failed, rejected
 	AgentVersion   string                     `json:"agent_version"`
 	TargetStatuses map[string]TargetAckStatus `json:"target_statuses,omitempty"`
+	WipeAck        *WipeAckPayload            `json:"wipe_ack,omitempty"`
 }
 
 // TargetAckStatus reports per-target status in an acknowledgement.

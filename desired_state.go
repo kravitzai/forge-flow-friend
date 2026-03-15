@@ -41,6 +41,17 @@ type DesiredStatePayload struct {
 
 	// Host-level policy
 	Policy *HostPolicy `json:"policy,omitempty"`
+
+	// Wipe instruction — explicit control-plane command for credential cleanup
+	WipeInstruction *WipeInstruction `json:"wipe_instruction,omitempty"`
+}
+
+// WipeInstruction is the control-plane command to wipe local credentials/state.
+// Only processed on explicit instruction — never on transient errors.
+type WipeInstruction struct {
+	Action      string `json:"action"`       // "wipe_local_credentials"
+	RequestedAt string `json:"requested_at"`
+	RequestedBy string `json:"requested_by"`
 }
 
 // HostConfigOverride allows backend to push safe config updates.
@@ -135,6 +146,13 @@ type CredentialEnvelope struct {
 	SenderPublicKey string `json:"sender_public_key"` // base64, 32 bytes
 	Nonce           string `json:"nonce"`             // base64, 24 bytes
 	Ciphertext      string `json:"ciphertext"`        // base64
+}
+
+// WipeAckPayload reports wipe result back to control plane.
+type WipeAckPayload struct {
+	Status       string `json:"status"`         // completed, failed
+	Error        string `json:"error,omitempty"`
+	WipedTargets int    `json:"wiped_targets"`
 }
 
 // ── Desired-State Sync Loop ──
@@ -259,6 +277,16 @@ func (sm *SyncManager) fetchAndReconcile() {
 
 	if payload == nil {
 		log.Printf("[sync] Empty desired-state — no changes")
+		return
+	}
+
+	// ── Check for wipe instruction BEFORE normal reconciliation ──
+	if payload.WipeInstruction != nil && payload.WipeInstruction.Action == "wipe_local_credentials" {
+		log.Printf("[sync] ⚠️  WIPE INSTRUCTION received from control plane (requested at: %s)", payload.WipeInstruction.RequestedAt)
+		wipeAck := sm.executeLocalWipe()
+		sm.sendWipeAck(payload.Revision, wipeAck)
+		// After wipe, send the normal ack too
+		sm.sendAck(payload.Revision, "applied")
 		return
 	}
 
@@ -482,6 +510,63 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 		state.LastSyncAt = time.Now()
 		state.LastAckStatus = status
 		sm.store.SaveState(state)
+	}
+}
+
+// executeLocalWipe stops all workers, deletes per-target credentials and state.
+// Preserves host identity so the wipe acknowledgement can be sent.
+func (sm *SyncManager) executeLocalWipe() WipeAckPayload {
+	targets := sm.supervisor.GetTargets()
+	wipedCount := 0
+
+	log.Printf("[wipe] Stopping all workers...")
+	sm.supervisor.Shutdown()
+
+	log.Printf("[wipe] Removing per-target credentials and state...")
+	for _, t := range targets {
+		// Delete credentials
+		if err := sm.store.DeleteSecret(t.CredentialRef); err != nil {
+			log.Printf("[wipe] Failed to delete credentials for %s: %v", t.Name, err)
+		} else {
+			log.Printf("[wipe] ✓ Deleted credentials for target: %s", t.Name)
+			wipedCount++
+		}
+	}
+
+	// Clear targets from state but keep host identity
+	state := sm.supervisor.GetState()
+	if state != nil {
+		state.Targets = []TargetProfile{}
+		if err := sm.store.SaveState(state); err != nil {
+			log.Printf("[wipe] Failed to save cleared state: %v", err)
+			return WipeAckPayload{Status: "failed", Error: fmt.Sprintf("state save failed: %v", err), WipedTargets: wipedCount}
+		}
+		log.Printf("[wipe] ✓ Cleared target profiles from local state")
+	}
+
+	log.Printf("[wipe] ✓ Local wipe complete — %d target credentials removed", wipedCount)
+	return WipeAckPayload{Status: "completed", WipedTargets: wipedCount}
+}
+
+// sendWipeAck sends a wipe acknowledgement to the backend.
+func (sm *SyncManager) sendWipeAck(revision int64, wipeResult WipeAckPayload) {
+	token := sm.supervisor.GetConnectorToken()
+	if token == "" {
+		log.Printf("[wipe] Cannot send wipe ack — no connector token")
+		return
+	}
+
+	ack := AckPayload{
+		Revision:     revision,
+		Status:       "applied",
+		AgentVersion: HostVersion,
+		WipeAck:      &wipeResult,
+	}
+
+	if err := sm.backend.SendAcknowledgement(token, ack); err != nil {
+		log.Printf("[wipe] Failed to send wipe ack: %v", err)
+	} else {
+		log.Printf("[wipe] ✓ Wipe acknowledgement sent to control plane")
 	}
 }
 
