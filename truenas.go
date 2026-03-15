@@ -129,7 +129,7 @@ func NewTrueNASClient(cfg *Config) *TrueNASClient {
 
 // apiGet makes an authenticated GET to the TrueNAS REST API
 func (t *TrueNASClient) apiGet(path string) (json.RawMessage, error) {
-	url := strings.TrimRight(t.cfg.TrueNASURL, "/") + path
+	url := strings.TrimRight(t.cfg.TrueNASURL, "/") + "/api/v2.0" + path
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -147,6 +147,13 @@ func (t *TrueNASClient) apiGet(path string) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
+
+	// Detect HTML responses (wrong endpoint or missing API prefix)
+	ct := resp.Header.Get("Content-Type")
+	if strings.Contains(ct, "text/html") || (len(body) > 0 && body[0] == '<') {
+		return nil, fmt.Errorf("GET %s: received HTML instead of JSON — verify the endpoint URL points to the TrueNAS host (e.g. https://truenas-ip), not the API path", path)
+	}
+
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("GET %s HTTP %d: %s", path, resp.StatusCode, string(body))
 	}
