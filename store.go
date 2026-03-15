@@ -20,8 +20,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -52,8 +54,15 @@ func NewStore(configDir string) (*Store, error) {
 	// Ensure directory structure
 	for _, dir := range []string{configDir, filepath.Join(configDir, secretsDirName)} {
 		if err := os.MkdirAll(dir, 0700); err != nil {
+			s.logMountDiagnostics(dir)
 			return nil, fmt.Errorf("create dir %s: %w", dir, err)
 		}
+	}
+
+	// Writability preflight — verify we can actually write to the config dir
+	if err := s.checkWritable(); err != nil {
+		s.logMountDiagnostics(configDir)
+		return nil, fmt.Errorf("config dir not writable: %w", err)
 	}
 
 	// Load or generate encryption key
@@ -62,6 +71,90 @@ func NewStore(configDir string) (*Store, error) {
 	}
 
 	return s, nil
+}
+
+// checkWritable verifies the config directory is writable by creating
+// and immediately removing a temporary probe file.
+func (s *Store) checkWritable() error {
+	probe := filepath.Join(s.configDir, ".write-probe")
+	f, err := os.Create(probe)
+	if err != nil {
+		return fmt.Errorf("cannot write to %s: %w", s.configDir, err)
+	}
+	f.Close()
+	os.Remove(probe)
+	return nil
+}
+
+// logMountDiagnostics prints actionable debugging information when a
+// directory permission error occurs. It reports the current UID/GID,
+// the failing path, and whether the path looks like a bind mount or
+// named Docker volume.
+func (s *Store) logMountDiagnostics(failPath string) {
+	uid := os.Getuid()
+	gid := os.Getgid()
+	log.Printf("[store] ── Permission diagnostics ──")
+	log.Printf("[store]   Process UID: %d  GID: %d", uid, gid)
+	log.Printf("[store]   Path tested: %s", failPath)
+
+	mountType := detectMountType(failPath)
+	log.Printf("[store]   Mount type:  %s", mountType)
+
+	log.Printf("[store] ── Suggested fixes ──")
+	if mountType == "bind mount" {
+		log.Printf("[store]   Fix host ownership:")
+		log.Printf("[store]     sudo chown -R %d:%d %s", uid, gid, s.configDir)
+		log.Printf("[store]     sudo chmod 700 %s %s/secrets", s.configDir, s.configDir)
+		log.Printf("[store]   Or switch to a named volume:")
+		log.Printf("[store]     docker run ... -v forgeai-config:/etc/forgeai ...")
+	} else {
+		log.Printf("[store]   Recreate the named volume:")
+		log.Printf("[store]     docker volume rm forgeai-config && docker compose up -d")
+	}
+}
+
+// detectMountType inspects /proc/mounts to determine whether the given
+// path is backed by a bind mount (host filesystem) or a named Docker volume.
+// Falls back to "unknown" outside Linux or when /proc/mounts is unavailable.
+func detectMountType(path string) string {
+	data, err := os.ReadFile("/proc/mounts")
+	if err != nil {
+		return "unknown (cannot read /proc/mounts)"
+	}
+
+	// Find the longest-prefix mount point that matches path
+	bestMount := ""
+	bestFsType := ""
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		mountPoint := fields[1]
+		fsType := fields[2]
+		if strings.HasPrefix(path, mountPoint) && len(mountPoint) > len(bestMount) {
+			bestMount = mountPoint
+			bestFsType = fsType
+		}
+	}
+
+	if bestMount == "" {
+		return "unknown"
+	}
+
+	// overlay = Docker named volume; ext4/xfs/btrfs with exact match = bind mount
+	switch {
+	case bestFsType == "overlay":
+		return "named volume (overlay)"
+	case bestMount == path || strings.HasPrefix(path, bestMount+"/"):
+		// If the mount point IS the config dir (or its parent), likely a bind mount
+		if bestFsType == "ext4" || bestFsType == "xfs" || bestFsType == "btrfs" || bestFsType == "zfs" {
+			return "bind mount (" + bestFsType + ")"
+		}
+		return "bind mount (" + bestFsType + ")"
+	default:
+		return bestFsType
+	}
 }
 
 // loadOrCreateKey loads the key file or generates a new one.

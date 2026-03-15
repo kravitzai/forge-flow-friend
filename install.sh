@@ -222,10 +222,22 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   echo ""
   echo "  URL: ${DOWNLOAD_URL}"
   echo ""
-  echo "  Fallback — use Docker:"
+  if [ "$HTTP_CODE" = "404" ]; then
+    echo "  Reason: No release artifact published for ${OS}/${ARCH} yet."
+    echo "  The release may not have been triggered, or this platform"
+    echo "  is not included in the current build matrix."
+    echo ""
+    echo "  Check available releases: ${RELEASES_URL}"
+  else
+    echo "  Reason: Network error or DNS failure (HTTP ${HTTP_CODE})."
+    echo "  Verify internet connectivity and try again."
+  fi
+  echo ""
+  echo "  Fallback — use Docker (recommended):"
   echo "    docker run -d --name forgeai-host \\"
   echo "      --pull always \\"
-  echo "      -v /etc/forgeai:/etc/forgeai \\"
+  echo "      --restart unless-stopped \\"
+  echo "      -v forgeai-config:/etc/forgeai \\"
   if [ -n "$ENROLLMENT_TOKEN" ]; then
     echo "      -e FORGEAI_ENROLLMENT_TOKEN='${ENROLLMENT_TOKEN}' \\"
   else
@@ -250,6 +262,12 @@ if [ "$HTTP_CODE" = "404" ] || [ "$HTTP_CODE" = "000" ]; then
   esac
   [ "$INSECURE_SKIP_VERIFY" = "true" ] && echo "      -e INSECURE_SKIP_VERIFY=true \\"
   echo "      ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest"
+  echo ""
+  echo "  If you prefer a bind mount instead of a named volume:"
+  echo "    sudo mkdir -p /etc/forgeai/secrets"
+  echo "    sudo chown -R 1000:1000 /etc/forgeai"
+  echo "    sudo chmod 700 /etc/forgeai /etc/forgeai/secrets"
+  echo "    # Then replace '-v forgeai-config:/etc/forgeai' with '-v /etc/forgeai:/etc/forgeai'"
   echo ""
   exit 1
 fi
