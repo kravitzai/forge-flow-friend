@@ -111,6 +111,49 @@ docker logs forgeai-host
 - **Auto-update** — signed binary updates with automatic rollback
 - **Non-root** — runs as unprivileged user
 
+## Reusing Existing State / Re-enrollment
+
+When reinstalling or redeploying a Connector Host with an existing named volume or config directory, the host **reuses its prior enrollment** instead of re-enrolling. If the backend registration was deleted or the connector token was revoked, desired-state sync will fail with an auth error.
+
+### Force a Clean Re-enrollment
+
+**Docker (named volume):**
+
+```bash
+docker stop forgeai-host && docker rm forgeai-host
+docker volume rm forgeai-config
+docker run -d --name forgeai-host \
+  --pull always --restart unless-stopped \
+  -v forgeai-config:/etc/forgeai \
+  -e FORGEAI_ENROLLMENT_TOKEN='fgbt_new_token_here' \
+  ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest
+```
+
+**Bind mount / systemd:**
+
+```bash
+sudo systemctl stop forgeai-host
+sudo rm -f /etc/forgeai/host.json.enc /etc/forgeai/host.key
+sudo rm -f /etc/forgeai/secrets/*.enc
+# Update FORGEAI_ENROLLMENT_TOKEN in /etc/forgeai/connector.env
+sudo systemctl start forgeai-host
+```
+
+**Installer with reset flag:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/kravitzai/forge-flow-friend/main/install.sh \
+  | bash -s -- --enroll-token 'fgbt_...' --force-reset-state
+```
+
+**Runtime reset flag:**
+
+```bash
+./connector-agent --force-reset-state
+```
+
+The `--force-reset-state` flag removes `host.json.enc`, `host.key`, and all files in `secrets/`, allowing the host to re-enroll cleanly.
+
 ## Releases & Docker Images
 
 - **GitHub Releases**: Pre-built binaries for linux/amd64 and linux/arm64

@@ -15,8 +15,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 )
+
+// contains is a case-insensitive substring check for error classification.
+func contains(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
 
 // ── Desired-State Payload Model ──
 
@@ -222,7 +228,32 @@ func (sm *SyncManager) fetchAndReconcile() {
 	payload, err := sm.backend.FetchDesiredState(token, string(manifestJSON))
 	if err != nil {
 		log.Printf("[sync] Desired-state fetch failed: %v", err)
-		log.Printf("[sync] Preserving existing local state (safe degradation)")
+
+		// Provide actionable guidance for auth failures vs transient errors
+		errStr := err.Error()
+		if contains(errStr, "token invalid") || contains(errStr, "revoked") || contains(errStr, "authentication failed") {
+			log.Printf("[sync] ── Likely cause ──")
+			log.Printf("[sync]   The stored connector token appears invalid or revoked.")
+			log.Printf("[sync]   This commonly happens when:")
+			log.Printf("[sync]     1. The host registration was deleted from the ForgeAI dashboard")
+			log.Printf("[sync]     2. The connector token was revoked")
+			log.Printf("[sync]     3. This container/service was reinstalled with an existing volume")
+			log.Printf("[sync]        that contains stale enrollment state from a previous host")
+			log.Printf("[sync] ── Recovery steps ──")
+			log.Printf("[sync]   Docker named volume:")
+			log.Printf("[sync]     docker stop forgeai-host && docker rm forgeai-host")
+			log.Printf("[sync]     docker volume rm forgeai-config")
+			log.Printf("[sync]     docker run ... -e FORGEAI_ENROLLMENT_TOKEN='fgbt_new_token' ...")
+			log.Printf("[sync]   Bind mount / systemd:")
+			log.Printf("[sync]     sudo systemctl stop forgeai-host")
+			log.Printf("[sync]     sudo rm -rf /etc/forgeai/host.json.enc /etc/forgeai/host.key /etc/forgeai/secrets/")
+			log.Printf("[sync]     # Update FORGEAI_ENROLLMENT_TOKEN in /etc/forgeai/connector.env")
+			log.Printf("[sync]     sudo systemctl start forgeai-host")
+			log.Printf("[sync]   Or run with --force-reset-state to clear persisted state automatically.")
+			log.Printf("[sync] ────────────────────")
+		} else {
+			log.Printf("[sync] Preserving existing local state (safe degradation)")
+		}
 		return
 	}
 

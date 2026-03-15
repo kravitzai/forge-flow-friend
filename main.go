@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,6 +35,39 @@ func main() {
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
 		configDir = defaultConfigDir
+	}
+
+	// ── Check for --force-reset-state flag ──
+	forceReset := false
+	for _, arg := range os.Args[1:] {
+		if arg == "--force-reset-state" {
+			forceReset = true
+		}
+	}
+
+	if forceReset {
+		log.Printf("[host] ⚠️  --force-reset-state: Clearing persisted enrollment state...")
+		resetFiles := []string{
+			filepath.Join(configDir, stateFileName),
+			filepath.Join(configDir, keyFileName),
+		}
+		for _, f := range resetFiles {
+			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
+				log.Printf("[host]   Failed to remove %s: %v", f, err)
+			} else if err == nil {
+				log.Printf("[host]   Removed: %s", f)
+			}
+		}
+		// Remove all secret files
+		secretsDir := filepath.Join(configDir, secretsDirName)
+		entries, _ := os.ReadDir(secretsDir)
+		for _, e := range entries {
+			p := filepath.Join(secretsDir, e.Name())
+			if err := os.Remove(p); err == nil {
+				log.Printf("[host]   Removed: %s", p)
+			}
+		}
+		log.Printf("[host] State reset complete. Host will re-enroll on this run.")
 	}
 
 	// Initialize encrypted store

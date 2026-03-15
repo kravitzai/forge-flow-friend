@@ -177,8 +177,27 @@ func MustEnroll(store *Store, backendURL string) (*HostState, error) {
 	// Already enrolled? Just load state.
 	state, err := store.LoadState()
 	if err == nil && state != nil && state.Identity.ConnectorToken != "" {
-		log.Printf("[enroll] Host already enrolled: %s (%s)",
-			state.Identity.Label, state.Identity.HostID[:12])
+		log.Printf("[enroll] ── Existing enrollment detected ──")
+		log.Printf("[enroll]   Host ID:    %s", state.Identity.HostID[:12])
+		log.Printf("[enroll]   Label:      %s", state.Identity.Label)
+		if !state.Identity.EnrolledAt.IsZero() {
+			log.Printf("[enroll]   Enrolled:   %s", state.Identity.EnrolledAt.Format(time.RFC3339))
+		}
+		log.Printf("[enroll]   Token:      %s...", state.Identity.ConnectorToken[:8])
+		log.Printf("[enroll] Reusing existing host identity and connector token.")
+		log.Printf("[enroll] The FORGEAI_ENROLLMENT_TOKEN environment variable will NOT be used.")
+		log.Printf("[enroll] If the stored token is invalid or revoked, desired-state sync will fail.")
+		log.Printf("[enroll] To force a clean re-enrollment, see --force-reset-state or manual reset steps below.")
+		log.Printf("[enroll] ── Reset instructions ──")
+		log.Printf("[enroll]   Docker named volume:")
+		log.Printf("[enroll]     docker stop forgeai-host && docker rm forgeai-host")
+		log.Printf("[enroll]     docker volume rm forgeai-config")
+		log.Printf("[enroll]     docker run ... -e FORGEAI_ENROLLMENT_TOKEN='fgbt_...' ...")
+		log.Printf("[enroll]   Bind mount / systemd:")
+		log.Printf("[enroll]     sudo systemctl stop forgeai-host")
+		log.Printf("[enroll]     sudo rm -rf /etc/forgeai/host.json.enc /etc/forgeai/host.key /etc/forgeai/secrets/")
+		log.Printf("[enroll]     sudo systemctl start forgeai-host")
+		log.Printf("[enroll] ────────────────────────")
 		return state, nil
 	}
 

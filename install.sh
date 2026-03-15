@@ -52,6 +52,7 @@ POLL_INTERVAL_SECONDS="30"
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/forgeai"
 SERVICE_USER="forgeai"
+FORCE_RESET_STATE=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -72,6 +73,7 @@ while [[ $# -gt 0 ]]; do
     --insecure)             INSECURE_SKIP_VERIFY="true"; shift ;;
     --poll-interval)        POLL_INTERVAL_SECONDS="$2"; shift 2 ;;
     --config-dir)           CONFIG_DIR="$2";            shift 2 ;;
+    --force-reset-state)    FORCE_RESET_STATE=true;     shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -129,13 +131,46 @@ else
   echo "→ Release: latest"
 fi
 
+# ── Handle --force-reset-state ──
+
+if [ "$FORCE_RESET_STATE" = true ]; then
+  echo ""
+  echo "⚠️  --force-reset-state: Clearing persisted host enrollment state..."
+  echo "   This will remove:"
+  echo "     - ${CONFIG_DIR}/host.json.enc  (encrypted host identity & config)"
+  echo "     - ${CONFIG_DIR}/host.key       (encryption key material)"
+  echo "     - ${CONFIG_DIR}/secrets/*      (per-target encrypted credentials)"
+  echo ""
+  sudo rm -f "${CONFIG_DIR}/host.json.enc" "${CONFIG_DIR}/host.key" 2>/dev/null || true
+  sudo rm -f "${CONFIG_DIR}/secrets/"*.enc 2>/dev/null || true
+  echo "   State cleared. Host will re-enroll on next start."
+  echo ""
+fi
+
 # ── Check for existing installation ──
 
 EXISTING_INSTALL=false
 if [ -f "${CONFIG_DIR}/host.json.enc" ] || [ -f "${CONFIG_DIR}/host.key" ]; then
   EXISTING_INSTALL=true
-  echo "→ Existing host installation detected at ${CONFIG_DIR}"
-  echo "  Upgrading binary without overwriting existing configuration."
+  echo ""
+  echo "╔══════════════════════════════════════════════════════════════╗"
+  echo "║  ℹ️  Existing Connector Host state detected                   ║"
+  echo "╚══════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "  Config dir: ${CONFIG_DIR}"
+  echo "  The host will reuse its existing enrollment identity and connector token."
+  echo "  Any FORGEAI_ENROLLMENT_TOKEN provided will NOT be used for a new enrollment."
+  echo ""
+  echo "  If the stored connector token is invalid or revoked (e.g. the host"
+  echo "  registration was deleted from the dashboard), desired-state sync will fail."
+  echo ""
+  echo "  To force a clean re-enrollment:"
+  echo "    • Rerun this installer with --force-reset-state"
+  echo "    • Or manually clear state:"
+  echo "        sudo rm -f ${CONFIG_DIR}/host.json.enc ${CONFIG_DIR}/host.key"
+  echo "        sudo rm -f ${CONFIG_DIR}/secrets/*.enc"
+  echo ""
+  echo "  Proceeding with binary upgrade (existing config preserved)."
   echo ""
 fi
 
