@@ -63,6 +63,21 @@ The host collects infrastructure telemetry for the targets you assign. All colle
 
 **Supported targets:** Proxmox VE, TrueNAS, Nutanix, Prometheus, Grafana, Ollama, Pure Storage, NetApp ONTAP, Dell PowerStore, Dell PowerMax, Dell PowerFlex, and generic HTTP endpoints.
 
+## Updating the Agent
+
+To update to the latest image while preserving your enrollment and target configuration:
+
+```bash
+docker stop forgeai-host && docker rm forgeai-host
+docker run -d --name forgeai-host \
+  --pull always \
+  --restart unless-stopped \
+  -v forgeai-config:/etc/forgeai \
+  ghcr.io/kravitzai/forge-flow-friend/connector-agent:latest
+```
+
+> **Note:** The enrollment token is **not** needed for updates. Your host identity and target credentials are persisted in the `forgeai-config` volume and reused automatically.
+
 ## Troubleshooting
 
 ### Stale Image / Wrong Binary
