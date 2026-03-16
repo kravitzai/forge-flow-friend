@@ -94,6 +94,7 @@ func main() {
 	supervisor.RegisterAdapter("grafana", NewGrafanaAdapter)
 	supervisor.RegisterAdapter("ollama", NewOllamaAdapter)
 	supervisor.RegisterAdapter("generic-http", NewGenericHTTPAdapter)
+	supervisor.RegisterAdapter("open-webui", NewOpenwebuiAdapter)
 	supervisor.RegisterAdapter("pure-storage", NewPureStorageAdapter)
 	supervisor.RegisterAdapter("netapp-ontap", NewNetAppONTAPAdapter)
 	supervisor.RegisterAdapter("powerstore", NewPowerStoreAdapter)

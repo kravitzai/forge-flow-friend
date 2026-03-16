@@ -315,6 +315,7 @@ var SupportedTargetTypes = []string{
 	"powermax",
 	"powerflex",
 	"ollama",
+	"open-webui",
 	"prometheus",
 	"grafana",
 	"generic-http",
