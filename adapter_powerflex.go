@@ -2,6 +2,8 @@
 //
 // Collects cluster/system health, storage capacity, alerts, and
 // inventory from Dell PowerFlex (VxFlex OS) Gateway REST API.
+// Produces normalized snapshot data aligned to the frontend
+// PowerFlexSnapshotData model.
 
 package main
 
@@ -17,10 +19,10 @@ import (
 )
 
 type PowerFlexAdapter struct {
-	profile    *TargetProfile
-	client     *http.Client
-	baseURL    string
-	authToken  string
+	profile   *TargetProfile
+	client    *http.Client
+	baseURL   string
+	authToken string
 }
 
 func NewPowerFlexAdapter(profile *TargetProfile) (TargetAdapter, error) {
@@ -68,8 +70,6 @@ func (a *PowerFlexAdapter) authenticate(username, password string) error {
 		return err
 	}
 	req.Header.Set("Content-Type", "application/json")
-
-	// PowerFlex Gateway uses Basic auth for login
 	req.SetBasicAuth(username, password)
 
 	resp, err := a.client.Do(req)
@@ -86,7 +86,6 @@ func (a *PowerFlexAdapter) authenticate(username, password string) error {
 		return fmt.Errorf("login HTTP %d: %s", resp.StatusCode, string(body[:min(200, len(body))]))
 	}
 
-	// Token is returned as a plain string in the response body
 	token := string(bytes.Trim(body, "\""))
 	if token != "" {
 		a.authToken = token
@@ -99,18 +98,56 @@ func (a *PowerFlexAdapter) Collect() (map[string]interface{}, error) {
 
 	version, _ := a.apiGet("/api/version")
 	systems, _ := a.apiGetList("/api/types/System/instances")
-	sds, _ := a.apiGetList("/api/types/Sds/instances")
+	sdsNodes, _ := a.apiGetList("/api/types/Sds/instances")
+	sdcNodes, _ := a.apiGetList("/api/types/Sdc/instances")
 	pools, _ := a.apiGetList("/api/types/StoragePool/instances")
+	volumes, _ := a.apiGetList("/api/types/Volume/instances")
+	devices, _ := a.apiGetList("/api/types/Device/instances")
+	protectionDomains, _ := a.apiGetList("/api/types/ProtectionDomain/instances")
 	alerts, _ := a.apiGetList("/api/types/Alert/instances")
 
-	snapshotData := map[string]interface{}{
-		"version":      version,
-		"systems":      systems,
-		"sds_nodes":    sds,
-		"storagePools": pools,
+	// Build normalized snapshot
+	systemInfo := a.extractSystemInfo(version, systems)
+	capacity := a.extractCapacity(systems)
+	poolSummaries := a.extractStoragePools(pools)
+	components := a.extractComponents(sdsNodes, sdcNodes, protectionDomains, pools, volumes, devices)
+	alertList := a.extractAlerts(alerts)
+
+	healthy := components["sdsDegraded"].(int) == 0 &&
+		len(alertList) == 0 || !a.hasCriticalAlerts(alertList)
+
+	criticalCount := 0
+	for _, al := range alertList {
+		if al["severity"] == "critical" {
+			criticalCount++
+		}
 	}
 
-	alertList := extractPowerFlexAlerts(alerts)
+	totalTB := float64(0)
+	if tb, ok := capacity["totalCapacityBytes"].(float64); ok && tb > 0 {
+		totalTB = tb / 1e12
+	}
+
+	summary := map[string]interface{}{
+		"healthy":        healthy,
+		"systemName":     systemInfo["systemName"],
+		"version":        systemInfo["version"],
+		"utilizationPct": capacity["utilizationPct"],
+		"totalCapacityTB": totalTB,
+		"sdsCount":       components["sdsCount"],
+		"sdcCount":       components["sdcCount"],
+		"activeAlerts":   len(alertList),
+		"criticalAlerts": criticalCount,
+	}
+
+	snapshotData := map[string]interface{}{
+		"system":       systemInfo,
+		"capacity":     capacity,
+		"storagePools": poolSummaries,
+		"components":   components,
+		"alerts":       alertList,
+		"summary":      summary,
+	}
 
 	return map[string]interface{}{
 		"capabilities": a.Capabilities(),
@@ -138,6 +175,207 @@ func (a *PowerFlexAdapter) Close() error {
 	a.client = nil
 	return nil
 }
+
+// ── Normalization helpers ──
+
+func (a *PowerFlexAdapter) extractSystemInfo(version map[string]interface{}, systems []interface{}) map[string]interface{} {
+	info := map[string]interface{}{
+		"systemName": nil,
+		"systemId":   nil,
+		"version":    nil,
+		"installId":  nil,
+		"endpoint":   a.baseURL,
+	}
+
+	if version != nil {
+		if v, ok := version["version"].(string); ok {
+			info["version"] = v
+		}
+	}
+
+	if len(systems) > 0 {
+		if sys, ok := systems[0].(map[string]interface{}); ok {
+			if n, ok := sys["name"].(string); ok {
+				info["systemName"] = n
+			}
+			if id, ok := sys["id"].(string); ok {
+				info["systemId"] = id
+			}
+			if iid, ok := sys["installId"].(string); ok {
+				info["installId"] = iid
+			}
+			// Fallback version from system object
+			if info["version"] == nil {
+				if sv, ok := sys["mdmClusterState"].(string); ok {
+					info["version"] = sv
+				}
+			}
+		}
+	}
+	return info
+}
+
+func (a *PowerFlexAdapter) extractCapacity(systems []interface{}) map[string]interface{} {
+	cap := map[string]interface{}{
+		"totalCapacityBytes":         nil,
+		"usedCapacityBytes":          nil,
+		"freeCapacityBytes":          nil,
+		"utilizationPct":             nil,
+		"thinCapacityAllocatedBytes": nil,
+		"spareCapacityBytes":         nil,
+	}
+
+	if len(systems) == 0 {
+		return cap
+	}
+
+	sys, ok := systems[0].(map[string]interface{})
+	if !ok {
+		return cap
+	}
+
+	// PowerFlex reports capacity in KB in the system statistics
+	totalKB := getFloatVal(sys, "maxCapacityInKb")
+	usedKB := getFloatVal(sys, "capacityInUseInKb")
+	spareKB := getFloatVal(sys, "spareCapacityInKb")
+	thinKB := getFloatVal(sys, "thinCapacityAllocatedInKb")
+
+	if totalKB > 0 {
+		total := totalKB * 1024
+		used := usedKB * 1024
+		free := total - used
+		cap["totalCapacityBytes"] = total
+		cap["usedCapacityBytes"] = used
+		cap["freeCapacityBytes"] = free
+		if total > 0 {
+			cap["utilizationPct"] = (used / total) * 100
+		}
+	}
+	if spareKB > 0 {
+		cap["spareCapacityBytes"] = spareKB * 1024
+	}
+	if thinKB > 0 {
+		cap["thinCapacityAllocatedBytes"] = thinKB * 1024
+	}
+
+	return cap
+}
+
+func (a *PowerFlexAdapter) extractStoragePools(pools []interface{}) []map[string]interface{} {
+	var result []map[string]interface{}
+	for _, item := range pools {
+		p, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		totalKB := getFloatVal(p, "maxCapacityInKb")
+		usedKB := getFloatVal(p, "capacityInUseInKb")
+		var utilizationPct interface{} = nil
+		if totalKB > 0 {
+			utilizationPct = (usedKB / totalKB) * 100
+		}
+
+		entry := map[string]interface{}{
+			"id":                 getStringVal(p, "id"),
+			"name":               getStringVal(p, "name"),
+			"totalCapacityBytes": nilIfZero(totalKB * 1024),
+			"usedCapacityBytes":  nilIfZero(usedKB * 1024),
+			"utilizationPct":     utilizationPct,
+			"mediaType":          getStringVal(p, "mediaType"),
+			"state":              getStringVal(p, "persistentChecksumState"),
+		}
+		result = append(result, entry)
+	}
+	return result
+}
+
+func (a *PowerFlexAdapter) extractComponents(
+	sdsNodes, sdcNodes, protectionDomains, pools, volumes, devices []interface{},
+) map[string]interface{} {
+	sdsHealthy, sdsDegraded := 0, 0
+	for _, item := range sdsNodes {
+		if s, ok := item.(map[string]interface{}); ok {
+			state := getStringVal(s, "sdsState")
+			if state == "Normal" || state == "normal" {
+				sdsHealthy++
+			} else {
+				sdsDegraded++
+			}
+		}
+	}
+
+	sdcConnected, sdcDisconnected := 0, 0
+	for _, item := range sdcNodes {
+		if s, ok := item.(map[string]interface{}); ok {
+			state := getStringVal(s, "sdcApproved")
+			mdmState := getStringVal(s, "mdmConnectionState")
+			if state == "true" && mdmState == "Connected" {
+				sdcConnected++
+			} else {
+				sdcDisconnected++
+			}
+		}
+	}
+
+	return map[string]interface{}{
+		"sdsCount":              len(sdsNodes),
+		"sdsHealthy":            sdsHealthy,
+		"sdsDegraded":           sdsDegraded,
+		"sdcCount":              len(sdcNodes),
+		"sdcConnected":          sdcConnected,
+		"sdcDisconnected":       sdcDisconnected,
+		"protectionDomainCount": len(protectionDomains),
+		"storagePoolCount":      len(pools),
+		"volumeCount":           len(volumes),
+		"deviceCount":           len(devices),
+	}
+}
+
+func (a *PowerFlexAdapter) extractAlerts(data []interface{}) []map[string]interface{} {
+	if data == nil {
+		return nil
+	}
+	var result []map[string]interface{}
+	for _, item := range data {
+		al, ok := item.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		severity := "warning"
+		if s := getStringVal(al, "severityString"); s != "" {
+			switch s {
+			case "CRITICAL", "critical":
+				severity = "critical"
+			case "WARNING", "warning":
+				severity = "warning"
+			default:
+				severity = "info"
+			}
+		}
+
+		result = append(result, map[string]interface{}{
+			"severity":  severity,
+			"alertType": getStringVal(al, "alertTypeString"),
+			"message":   getStringVal(al, "alertTypeString"),
+			"component": getStringVal(al, "objectType"),
+			"startTime": getStringVal(al, "startTime"),
+		})
+	}
+	return result
+}
+
+func (a *PowerFlexAdapter) hasCriticalAlerts(alerts []map[string]interface{}) bool {
+	for _, al := range alerts {
+		if al["severity"] == "critical" {
+			return true
+		}
+	}
+	return false
+}
+
+// ── HTTP helpers ──
 
 func (a *PowerFlexAdapter) apiGet(path string) (map[string]interface{}, error) {
 	req, err := http.NewRequest("GET", a.baseURL+path, nil)
@@ -205,29 +443,25 @@ func (a *PowerFlexAdapter) apiGetList(path string) ([]interface{}, error) {
 	return result, nil
 }
 
-func extractPowerFlexAlerts(data []interface{}) []map[string]interface{} {
-	if data == nil {
+// ── Utility functions ──
+
+func getStringVal(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func getFloatVal(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+func nilIfZero(v float64) interface{} {
+	if v == 0 {
 		return nil
 	}
-	var alerts []map[string]interface{}
-	for _, item := range data {
-		if a, ok := item.(map[string]interface{}); ok {
-			severity := "warning"
-			if s, ok := a["severityString"].(string); ok {
-				severity = s
-			} else if s, ok := a["severity"].(string); ok {
-				severity = s
-			}
-			desc := ""
-			if d, ok := a["alertTypeString"].(string); ok {
-				desc = d
-			}
-			alerts = append(alerts, map[string]interface{}{
-				"severity": severity,
-				"source":   "powerflex",
-				"message":  desc,
-			})
-		}
-	}
-	return alerts
+	return v
 }

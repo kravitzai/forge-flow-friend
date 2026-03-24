@@ -44,6 +44,9 @@ type DesiredStatePayload struct {
 
 	// Wipe instruction — explicit control-plane command for credential cleanup
 	WipeInstruction *WipeInstruction `json:"wipe_instruction,omitempty"`
+
+	// Pending relay commands — live API queries from users to execute locally
+	PendingCommands []RelayCommand `json:"pending_commands,omitempty"`
 }
 
 // WipeInstruction is the control-plane command to wipe local credentials/state.
@@ -159,14 +162,18 @@ type WipeAckPayload struct {
 
 // SyncManager handles periodic desired-state fetching and reconciliation.
 type SyncManager struct {
-	backend    *BackendClient
-	store      *Store
-	supervisor *Supervisor
-	validator  *ProfileValidator
-	hostKeyPair *HostKeyPair
-	interval   time.Duration
-	cancel     context.CancelFunc
-	done       chan struct{}
+	backend      *BackendClient
+	store        *Store
+	supervisor   *Supervisor
+	validator    *ProfileValidator
+	hostKeyPair  *HostKeyPair
+	relayHandler *RelayHandler
+	interval     time.Duration
+	fastInterval time.Duration // shorter interval when relay commands were received
+	cancel       context.CancelFunc
+	done         chan struct{}
+	// fastPollUntil: when set to a future time, use fastInterval instead of interval
+	fastPollUntil time.Time
 }
 
 // NewSyncManager creates a sync manager.
@@ -181,13 +188,15 @@ func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor
 	}
 
 	return &SyncManager{
-		backend:     backend,
-		store:       store,
-		supervisor:  supervisor,
-		validator:   NewProfileValidator(),
-		hostKeyPair: kp,
-		interval:    60 * time.Second,
-		done:        make(chan struct{}),
+		backend:      backend,
+		store:        store,
+		supervisor:   supervisor,
+		validator:    NewProfileValidator(),
+		hostKeyPair:  kp,
+		relayHandler: NewRelayHandler(supervisor, backend, store),
+		interval:     60 * time.Second,
+		fastInterval: 5 * time.Second,
+		done:         make(chan struct{}),
 	}
 }
 
@@ -201,7 +210,7 @@ func (sm *SyncManager) Start(interval time.Duration) {
 	sm.cancel = cancel
 
 	go sm.run(ctx)
-	log.Printf("[sync] Desired-state sync started (interval: %v)", sm.interval)
+	log.Printf("[sync] Desired-state sync started (interval: %v, fast: %v)", sm.interval, sm.fastInterval)
 }
 
 // Stop halts the sync loop.
@@ -218,14 +227,17 @@ func (sm *SyncManager) run(ctx context.Context) {
 	// Fetch immediately on start
 	sm.fetchAndReconcile()
 
-	ticker := time.NewTicker(sm.interval)
-	defer ticker.Stop()
-
 	for {
+		// Use fast interval if we recently processed relay commands
+		pollInterval := sm.interval
+		if time.Now().Before(sm.fastPollUntil) {
+			pollInterval = sm.fastInterval
+		}
+
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-time.After(pollInterval):
 			sm.fetchAndReconcile()
 		}
 	}
@@ -288,6 +300,14 @@ func (sm *SyncManager) fetchAndReconcile() {
 		// After wipe, send the normal ack too
 		sm.sendAck(payload.Revision, "applied")
 		return
+	}
+
+	// ── Process pending relay commands (live API queries from users) ──
+	if len(payload.PendingCommands) > 0 {
+		log.Printf("[sync] Received %d pending relay command(s) — entering fast-poll mode", len(payload.PendingCommands))
+		// Enter fast-poll mode for 30 seconds to pick up follow-up commands quickly
+		sm.fastPollUntil = time.Now().Add(30 * time.Second)
+		go sm.relayHandler.ProcessCommands(payload.PendingCommands)
 	}
 
 	// Validate all target profiles before applying any

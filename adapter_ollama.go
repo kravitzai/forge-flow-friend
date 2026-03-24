@@ -60,29 +60,73 @@ func (a *OllamaAdapter) Collect() (map[string]interface{}, error) {
 	tags, _ := a.apiGet("/api/tags")
 	ps, _ := a.apiGet("/api/ps")
 
-	// Extract model list
-	var models []interface{}
-	if tags != nil {
-		if m, ok := tags["models"].([]interface{}); ok {
-			models = m
+	// Extract version string
+	versionStr := ""
+	if version != nil {
+		if v, ok := version["version"].(string); ok {
+			versionStr = v
 		}
 	}
 
-	// Extract running models
+	// Build runtime object matching OllamaSnapshotData.runtime
+	healthy := versionStr != ""
+	runtime := map[string]interface{}{
+		"version":  versionStr,
+		"healthy":  healthy,
+		"endpoint": a.baseURL,
+	}
+
+	// Extract and normalize model list
+	var models []interface{}
+	if tags != nil {
+		if m, ok := tags["models"].([]interface{}); ok {
+			normalizedModels := make([]interface{}, 0, len(m))
+			for _, raw := range m {
+				if obj, ok := raw.(map[string]interface{}); ok {
+					normalized := map[string]interface{}{
+						"name":              obj["name"],
+						"size":              obj["size"],
+						"digest":            obj["digest"],
+						"modifiedAt":        obj["modified_at"],
+						"family":            getNestedDetail(obj, "family"),
+						"parameterSize":     getNestedDetail(obj, "parameter_size"),
+						"quantizationLevel": getNestedDetail(obj, "quantization_level"),
+					}
+					normalizedModels = append(normalizedModels, normalized)
+				}
+			}
+			models = normalizedModels
+		}
+	}
+
+	// Extract and normalize running models
 	var running []interface{}
 	if ps != nil {
 		if m, ok := ps["models"].([]interface{}); ok {
-			running = m
+			normalizedRunning := make([]interface{}, 0, len(m))
+			for _, raw := range m {
+				if obj, ok := raw.(map[string]interface{}); ok {
+					normalized := map[string]interface{}{
+						"name":      obj["name"],
+						"size":      obj["size"],
+						"digest":    obj["digest"],
+						"expiresAt": obj["expires_at"],
+						"sizeVram":  obj["size_vram"],
+					}
+					normalizedRunning = append(normalizedRunning, normalized)
+				}
+			}
+			running = normalizedRunning
 		}
 	}
 
 	snapshotData := map[string]interface{}{
-		"version":       version,
+		"runtime":       runtime,
 		"models":        models,
 		"runningModels": running,
 		"summary": map[string]interface{}{
-			"model_count":   len(models),
-			"running_count": len(running),
+			"modelCount":   len(models),
+			"runningCount": len(running),
 		},
 	}
 
@@ -92,6 +136,14 @@ func (a *OllamaAdapter) Collect() (map[string]interface{}, error) {
 		"alerts":       []map[string]interface{}{},
 		"collectedAt":  now,
 	}, nil
+}
+
+// getNestedDetail extracts a field from the Ollama "details" sub-object.
+func getNestedDetail(obj map[string]interface{}, key string) interface{} {
+	if details, ok := obj["details"].(map[string]interface{}); ok {
+		return details[key]
+	}
+	return nil
 }
 
 func (a *OllamaAdapter) Capabilities() []string {

@@ -391,6 +391,21 @@ func (s *Supervisor) GetTargets() []TargetProfile {
 	return targets
 }
 
+// FindTarget returns a pointer to a target profile by ID, or nil.
+func (s *Supervisor) FindTarget(targetID string) *TargetProfile {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.state == nil {
+		return nil
+	}
+	for i := range s.state.Targets {
+		if s.state.Targets[i].TargetID == targetID {
+			return &s.state.Targets[i]
+		}
+	}
+	return nil
+}
+
 // Status returns a summary of all workers.
 func (s *Supervisor) Status() []WorkerState {
 	s.mu.RLock()
