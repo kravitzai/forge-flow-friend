@@ -282,27 +282,33 @@ func applyAuth(req *http.Request, target *TargetProfile, creds map[string]string
 // applyProxmoxAuth sets the Proxmox PVE API token header.
 // Format: PVEAPIToken=user@realm!tokenid=secret
 func applyProxmoxAuth(req *http.Request, target *TargetProfile, creds map[string]string) {
-	tokenID := creds["token_id"]
+	// token_id is stored in target_config (e.g. "api@pam!forgeagent")
+	// token_secret is stored in encrypted credentials
+	var tokenID string
+	if tc := target.TargetConfig; tc != nil {
+		if v, ok := tc["token_id"].(string); ok {
+			tokenID = v
+		}
+	}
+	// Fallback: check creds for backward compatibility
+	if tokenID == "" {
+		tokenID = creds["token_id"]
+	}
 	tokenSecret := creds["token_secret"]
-	if tokenID != "" && tokenSecret != "" {
-		// Build username from creds or target config
-		username := creds["username"]
-		if username == "" {
-			if tc := target.TargetConfig; tc != nil {
-				if v, ok := tc["username"].(string); ok {
-					username = v
-				}
-			}
-		}
-		if username != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s!%s=%s", username, tokenID, tokenSecret))
-		} else {
-			// Fallback: tokenID may already contain user@realm!tokenid
-			req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", tokenID, tokenSecret))
-		}
+
+	if tokenID == "" {
+		log.Printf("[relay] WARNING: Proxmox target missing token_id in target_config and creds")
 		return
 	}
-	log.Printf("[relay] WARNING: Proxmox target has no token_id/token_secret — relay auth will fail")
+	if tokenSecret == "" {
+		log.Printf("[relay] WARNING: Proxmox target missing token_secret in credentials")
+		return
+	}
+
+	// Format matches proxmox.go snapshot collector: PVEAPIToken=user@realm!tokenname=secret
+	header := fmt.Sprintf("PVEAPIToken=%s=%s", tokenID, tokenSecret)
+	req.Header.Set("Authorization", header)
+	log.Printf("[relay] Applied Proxmox API token auth from target_config + encrypted secret")
 }
 
 // buildHTTPClient creates an HTTP client respecting TLS config.
