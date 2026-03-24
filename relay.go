@@ -73,11 +73,13 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"read-only": true,
 		},
 		allowedPlatforms: map[string]bool{
-			"proxmox":  true,
-			"ollama":   true,
-			"nutanix":  true,
-			"truenas":  true,
-			"openwebui": true,
+			"proxmox":    true,
+			"ollama":     true,
+			"nutanix":    true,
+			"truenas":    true,
+			"openwebui":  true,
+			"prometheus": true,
+			"grafana":    true,
 		},
 	}
 }
@@ -258,6 +260,12 @@ func applyAuth(req *http.Request, target *TargetProfile, creds map[string]string
 		return
 	}
 
+	// Prometheus: support custom header-based auth (e.g. X-Token, Authorization via header_name/header_value)
+	if target.TargetType == "prometheus" {
+		applyPrometheusAuth(req, target, creds)
+		return
+	}
+
 	switch target.AuthType {
 	case "basic", "username_password":
 		username := creds["username"]
@@ -271,12 +279,46 @@ func applyAuth(req *http.Request, target *TargetProfile, creds map[string]string
 			token = creds["api_key"]
 		}
 		if token == "" {
+			token = creds["api_token"]
+		}
+		if token == "" {
 			token = creds["service_token"]
 		}
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
 	}
+}
+
+// applyPrometheusAuth handles Prometheus header-based or basic auth.
+// Matches the adapter_prometheus.go Init() auth logic.
+func applyPrometheusAuth(req *http.Request, target *TargetProfile, creds map[string]string) {
+	// Custom header auth (e.g. header_name=Authorization, header_value=Bearer xxx)
+	if headerName := creds["header_name"]; headerName != "" {
+		req.Header.Set(headerName, creds["header_value"])
+		log.Printf("[relay] Applied Prometheus custom header auth (%s)", headerName)
+		return
+	}
+
+	// Basic auth fallback
+	if username := creds["username"]; username != "" {
+		req.SetBasicAuth(username, creds["password"])
+		log.Printf("[relay] Applied Prometheus basic auth")
+		return
+	}
+
+	// Bearer token fallback
+	token := creds["token"]
+	if token == "" {
+		token = creds["api_token"]
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+		log.Printf("[relay] Applied Prometheus bearer auth")
+		return
+	}
+
+	log.Printf("[relay] WARNING: Prometheus target has no auth credentials configured")
 }
 
 // applyProxmoxAuth sets the Proxmox PVE API token header.
