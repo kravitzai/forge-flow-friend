@@ -99,7 +99,7 @@ func NewProxmoxClient(cfg *Config) *ProxmoxClient {
 	}
 	return &ProxmoxClient{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: transport},
 	}
 }
 

@@ -290,7 +290,7 @@ func buildHTTPClient(target *TargetProfile) *http.Client {
 	}
 	return &http.Client{
 		Transport: transport,
-		Timeout:   30 * time.Second,
+		Timeout:   60 * time.Second,
 	}
 }
 
