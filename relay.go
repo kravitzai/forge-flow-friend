@@ -252,6 +252,12 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 
 // applyAuth sets authentication headers based on target config.
 func applyAuth(req *http.Request, target *TargetProfile, creds map[string]string) {
+	// Platform-specific auth overrides
+	if target.TargetType == "proxmox" {
+		applyProxmoxAuth(req, target, creds)
+		return
+	}
+
 	switch target.AuthType {
 	case "basic", "username_password":
 		username := creds["username"]
@@ -270,17 +276,33 @@ func applyAuth(req *http.Request, target *TargetProfile, creds map[string]string
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
-	case "proxmox_api_token":
-		// Proxmox PVE API token format: PVEAPIToken=user@realm!tokenid=secret
-		tokenID := creds["token_id"]
-		tokenSecret := creds["token_secret"]
-		username := creds["username"]
-		if tokenID != "" && tokenSecret != "" {
-			req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s!%s=%s", username, tokenID, tokenSecret))
-		} else if creds["api_key"] != "" {
-			req.Header.Set("Authorization", "PVEAPIToken="+creds["api_key"])
-		}
 	}
+}
+
+// applyProxmoxAuth sets the Proxmox PVE API token header.
+// Format: PVEAPIToken=user@realm!tokenid=secret
+func applyProxmoxAuth(req *http.Request, target *TargetProfile, creds map[string]string) {
+	tokenID := creds["token_id"]
+	tokenSecret := creds["token_secret"]
+	if tokenID != "" && tokenSecret != "" {
+		// Build username from creds or target config
+		username := creds["username"]
+		if username == "" {
+			if tc := target.TargetConfig; tc != nil {
+				if v, ok := tc["username"].(string); ok {
+					username = v
+				}
+			}
+		}
+		if username != "" {
+			req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s!%s=%s", username, tokenID, tokenSecret))
+		} else {
+			// Fallback: tokenID may already contain user@realm!tokenid
+			req.Header.Set("Authorization", fmt.Sprintf("PVEAPIToken=%s=%s", tokenID, tokenSecret))
+		}
+		return
+	}
+	log.Printf("[relay] WARNING: Proxmox target has no token_id/token_secret — relay auth will fail")
 }
 
 // buildHTTPClient creates an HTTP client respecting TLS config.
