@@ -319,6 +319,12 @@ var SupportedTargetTypes = []string{
 	"prometheus",
 	"grafana",
 	"generic-http",
+	"kubernetes",
+	"nexus",
+	"ndfc",
+	"brocade",
+	"powerswitch",
+	"infiniband",
 }
 
 // IsValidTargetType checks if a target type is supported.

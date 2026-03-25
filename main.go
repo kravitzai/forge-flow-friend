@@ -100,6 +100,12 @@ func main() {
 	supervisor.RegisterAdapter("powerstore", NewPowerStoreAdapter)
 	supervisor.RegisterAdapter("powermax", NewPowerMaxAdapter)
 	supervisor.RegisterAdapter("powerflex", NewPowerFlexAdapter)
+	supervisor.RegisterAdapter("kubernetes", NewKubernetesAdapter)
+	supervisor.RegisterAdapter("nexus", NewNexusAdapter)
+	supervisor.RegisterAdapter("ndfc", NewNdfcAdapter)
+	supervisor.RegisterAdapter("brocade", NewBrocadeAdapter)
+	supervisor.RegisterAdapter("powerswitch", NewPowerSwitchAdapter)
+	supervisor.RegisterAdapter("infiniband", NewInfiniBandAdapter)
 
 	// ── Enrollment / State Loading ──
 	// Priority:
