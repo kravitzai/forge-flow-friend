@@ -134,6 +134,15 @@ func main() {
 
 	log.Printf("[host] Configured targets: %d", supervisor.TargetCount())
 
+	// ── Upload Queue ──
+	uploadQueue := NewUploadQueue(backend, DefaultUploadQueueConfig())
+	uploadQueue.Start()
+	supervisor.SetUploadQueue(uploadQueue)
+
+	// ── Metrics Logger ──
+	metricsStopCh := make(chan struct{})
+	StartMetricsLogger(5*time.Minute, metricsStopCh)
+
 	// Reconcile — starts workers for all enabled targets
 	if err := supervisor.Reconcile(); err != nil {
 		log.Fatalf("[supervisor] Reconciliation failed: %v", err)
@@ -222,15 +231,24 @@ func main() {
 
 	log.Printf("[host] Received %v, shutting down gracefully...", sig)
 
+	// Stop metrics logger
+	close(metricsStopCh)
+
+	// Final metrics dump
+	agentMetrics.DumpToLog()
+
 	if syncManager != nil {
 		syncManager.Stop()
 	}
 	if updateManager != nil {
-		// Drain workers before potential update apply
 		updateManager.DrainWorkers(10 * time.Second)
 	} else {
 		supervisor.Shutdown()
 	}
+
+	// Stop upload queue after workers are done
+	uploadQueue.Stop()
+
 	log.Printf("[host] Shutdown complete")
 }
 

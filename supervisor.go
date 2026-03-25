@@ -15,13 +15,14 @@ import (
 
 // Supervisor manages the lifecycle of all target workers.
 type Supervisor struct {
-	mu       sync.RWMutex
-	store    *Store
-	state    *HostState
-	workers  map[string]*Worker // targetID -> worker
-	adapters map[string]AdapterFactory
-	backend  *BackendClient
-	policy   RetryPolicy
+	mu          sync.RWMutex
+	store       *Store
+	state       *HostState
+	workers     map[string]*Worker // targetID -> worker
+	adapters    map[string]AdapterFactory
+	backend     *BackendClient
+	policy      RetryPolicy
+	uploadQueue *UploadQueue // shared upload queue (nil = inline)
 }
 
 // NewSupervisor creates a new supervisor with the given store and backend.
@@ -40,6 +41,13 @@ func (s *Supervisor) RegisterAdapter(targetType string, factory AdapterFactory) 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.adapters[targetType] = factory
+}
+
+// SetUploadQueue sets the shared upload queue for all workers.
+func (s *Supervisor) SetUploadQueue(q *UploadQueue) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.uploadQueue = q
 }
 
 // Initialize loads or creates host state, handles legacy migration.
@@ -205,12 +213,13 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 
 	// Create and start worker
 	worker := NewWorker(WorkerConfig{
-		Profile:   target,
-		Adapter:   adapter,
-		Creds:     creds,
-		Policy:    s.policy,
-		Backend:   s.backend,
-		HostToken: s.state.Identity.ConnectorToken,
+		Profile:     target,
+		Adapter:     adapter,
+		Creds:       creds,
+		Policy:      s.policy,
+		Backend:     s.backend,
+		HostToken:   s.state.Identity.ConnectorToken,
+		UploadQueue: s.uploadQueue,
 		OnStateChange: func(targetID string, status WorkerStatus) {
 			s.onWorkerStateChange(targetID, status)
 		},

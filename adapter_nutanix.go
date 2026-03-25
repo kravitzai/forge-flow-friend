@@ -67,26 +67,71 @@ func (a *NutanixAdapter) Init(profile *TargetProfile, creds map[string]string) e
 func (a *NutanixAdapter) Collect() (map[string]interface{}, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	cluster, _ := a.apiGet("/api/nutanix/v2/cluster/")
-	hosts, _ := a.apiGet("/api/nutanix/v2/hosts/")
-	containers, _ := a.apiGet("/api/nutanix/v2/storage_containers/")
-	vms, _ := a.apiGet("/api/nutanix/v2/vms/?include_vm_disk_config=false&include_vm_nic_config=false")
-	alerts, _ := a.apiGet("/api/nutanix/v2/alerts/?resolved=false")
-
-	snapshotData := map[string]interface{}{
-		"cluster":    cluster,
-		"hosts":      extractEntities(hosts),
-		"containers": extractEntities(containers),
-		"vms":        extractEntities(vms),
+	// Define independent sub-collection tasks
+	tasks := []SubCollectionTask{
+		{Name: "cluster", Fn: func() (map[string]interface{}, error) {
+			return a.apiGet("/api/nutanix/v2/cluster/")
+		}},
+		{Name: "hosts", Fn: func() (map[string]interface{}, error) {
+			return a.apiGet("/api/nutanix/v2/hosts/")
+		}},
+		{Name: "containers", Fn: func() (map[string]interface{}, error) {
+			return a.apiGet("/api/nutanix/v2/storage_containers/")
+		}},
+		{Name: "vms", Fn: func() (map[string]interface{}, error) {
+			return a.apiGet("/api/nutanix/v2/vms/?include_vm_disk_config=false&include_vm_nic_config=false")
+		}},
+		{Name: "alerts", Fn: func() (map[string]interface{}, error) {
+			return a.apiGet("/api/nutanix/v2/alerts/?resolved=false")
+		}},
 	}
 
-	alertList := extractAlerts(alerts)
+	// Run with bounded concurrency (4 concurrent calls)
+	result := RunConcurrentCollection(tasks, 4)
+
+	// Log partial failures explicitly
+	if len(result.FailedSections) > 0 {
+		log.Printf("[nutanix:%s] Partial collection: %d/%d sections failed: %v",
+			a.profile.Name, len(result.FailedSections), result.TotalSections, result.FailedSections)
+	}
+
+	// If everything failed, return error
+	if result.Status() == "error" {
+		return nil, fmt.Errorf("all %d sub-collections failed", result.TotalSections)
+	}
+
+	// Build snapshot from successful sections
+	snapshotData := map[string]interface{}{}
+	if cluster, ok := result.Sections["cluster"]; ok {
+		snapshotData["cluster"] = cluster
+	}
+	if hosts, ok := result.Sections["hosts"]; ok {
+		snapshotData["hosts"] = extractEntities(hosts.(map[string]interface{}))
+	}
+	if containers, ok := result.Sections["containers"]; ok {
+		snapshotData["containers"] = extractEntities(containers.(map[string]interface{}))
+	}
+	if vms, ok := result.Sections["vms"]; ok {
+		snapshotData["vms"] = extractEntities(vms.(map[string]interface{}))
+	}
+
+	// Add degraded marker if partial
+	if marker := result.DegradedMarker(); marker != nil {
+		snapshotData["_collection_status"] = marker
+	}
+
+	// Extract alerts from the alerts section
+	var alertList []map[string]interface{}
+	if alerts, ok := result.Sections["alerts"]; ok {
+		alertList = extractAlerts(alerts.(map[string]interface{}))
+	}
 
 	return map[string]interface{}{
 		"capabilities": a.Capabilities(),
 		"snapshotData": snapshotData,
 		"alerts":       alertList,
 		"collectedAt":  now,
+		"_subCalls":    result.SubCalls,
 	}, nil
 }
 

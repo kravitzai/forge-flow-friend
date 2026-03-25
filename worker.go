@@ -8,6 +8,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math"
@@ -29,18 +30,22 @@ type Worker struct {
 	backend  *BackendClient
 	hostToken string
 
+	// Upload queue (nil = inline upload for backward compat)
+	uploadQueue *UploadQueue
+
 	// Callbacks
 	onStateChange func(targetID string, status WorkerStatus)
 }
 
 // WorkerConfig bundles everything needed to create a worker.
 type WorkerConfig struct {
-	Profile   *TargetProfile
-	Adapter   TargetAdapter
-	Creds     map[string]string
-	Policy    RetryPolicy
-	Backend   *BackendClient
-	HostToken string
+	Profile       *TargetProfile
+	Adapter       TargetAdapter
+	Creds         map[string]string
+	Policy        RetryPolicy
+	Backend       *BackendClient
+	HostToken     string
+	UploadQueue   *UploadQueue
 	OnStateChange func(targetID string, status WorkerStatus)
 }
 
@@ -57,6 +62,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		done:          make(chan struct{}),
 		backend:       cfg.Backend,
 		hostToken:     cfg.HostToken,
+		uploadQueue:   cfg.UploadQueue,
 		onStateChange: cfg.OnStateChange,
 		state: WorkerState{
 			TargetID: cfg.Profile.TargetID,
@@ -166,13 +172,51 @@ func (w *Worker) run() {
 
 // collect performs one collection cycle with retry/backoff handling.
 func (w *Worker) collect() {
+	collectStart := time.Now()
 	payload, err := w.adapter.Collect()
+	collectDuration := time.Since(collectStart)
+
 	if err != nil {
+		// Record failed collection metrics
+		agentMetrics.RecordCollection(
+			w.profile.TargetID, w.profile.TargetType, w.profile.Name,
+			collectDuration, 0, "error", nil,
+		)
 		w.handleError(err)
-		// Send heartbeat instead of snapshot on error
 		w.sendHeartbeat()
 		return
 	}
+
+	// Extract sub-call metrics if present
+	var subCalls []SubCallMetric
+	if sc, ok := payload["_subCalls"]; ok {
+		if scList, ok := sc.([]SubCallMetric); ok {
+			subCalls = scList
+		}
+		delete(payload, "_subCalls")
+	}
+
+	// Determine collection status from payload
+	collectionStatus := "ok"
+	if sd, ok := payload["snapshotData"].(map[string]interface{}); ok {
+		if cs, ok := sd["_collection_status"].(map[string]interface{}); ok {
+			if _, degraded := cs["degraded"]; degraded {
+				collectionStatus = "partial"
+			}
+		}
+	}
+
+	// Calculate payload size
+	var payloadBytes int64
+	if data, e := json.Marshal(payload); e == nil {
+		payloadBytes = int64(len(data))
+	}
+
+	// Record collection metrics
+	agentMetrics.RecordCollection(
+		w.profile.TargetID, w.profile.TargetType, w.profile.Name,
+		collectDuration, payloadBytes, collectionStatus, subCalls,
+	)
 
 	// Reset error state on success
 	w.mu.Lock()
@@ -195,10 +239,20 @@ func (w *Worker) collect() {
 	payload["targetId"] = w.profile.TargetID
 	payload["targetType"] = w.profile.TargetType
 
-	if err := w.backend.Post(w.hostToken, payload); err != nil {
-		log.Printf("[worker:%s] Snapshot delivery failed: %v", w.profile.Name, err)
+	// Upload via queue or inline
+	if w.uploadQueue != nil {
+		priority := ClassifySnapshotPriority(payload)
+		if !w.uploadQueue.Enqueue(w.hostToken, payload, priority) {
+			log.Printf("[worker:%s] Snapshot dropped by upload queue", w.profile.Name)
+		}
 	} else {
-		log.Printf("[worker:%s] Snapshot delivered", w.profile.Name)
+		// Inline fallback (legacy)
+		if err := w.backend.Post(w.hostToken, payload); err != nil {
+			log.Printf("[worker:%s] Snapshot delivery failed: %v", w.profile.Name, err)
+		} else {
+			log.Printf("[worker:%s] Snapshot delivered (%.1fKB in %v)",
+				w.profile.Name, float64(payloadBytes)/1024, collectDuration.Round(time.Millisecond))
+		}
 	}
 }
 

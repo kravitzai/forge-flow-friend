@@ -69,22 +69,56 @@ func (a *PowerMaxAdapter) Init(profile *TargetProfile, creds map[string]string) 
 func (a *PowerMaxAdapter) Collect() (map[string]interface{}, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	version, _ := a.apiGet("/univmax/restapi/system/version")
-
-	snapshotData := map[string]interface{}{
-		"version": version,
+	tasks := []SubCollectionTask{
+		{Name: "version", Fn: func() (map[string]interface{}, error) {
+			return a.apiGet("/univmax/restapi/system/version")
+		}},
 	}
-	var alertList []map[string]interface{}
 
 	if a.symmetrixID != "" {
 		prefix := "/univmax/restapi/100/system/symmetrix/" + a.symmetrixID
-		health, _ := a.apiGet(prefix + "/health")
-		srdfLinks, _ := a.apiGet(prefix + "/rdf_group")
-		alerts, _ := a.apiGet(prefix + "/alert?acknowledged=false")
+		tasks = append(tasks,
+			SubCollectionTask{Name: "health", Fn: func() (map[string]interface{}, error) {
+				return a.apiGet(prefix + "/health")
+			}},
+			SubCollectionTask{Name: "srdf_groups", Fn: func() (map[string]interface{}, error) {
+				return a.apiGet(prefix + "/rdf_group")
+			}},
+			SubCollectionTask{Name: "alerts", Fn: func() (map[string]interface{}, error) {
+				return a.apiGet(prefix + "/alert?acknowledged=false")
+			}},
+		)
+	}
 
+	result := RunConcurrentCollection(tasks, 4)
+
+	if len(result.FailedSections) > 0 {
+		log.Printf("[powermax:%s] Partial collection: %d/%d sections failed: %v",
+			a.profile.Name, len(result.FailedSections), result.TotalSections, result.FailedSections)
+	}
+
+	if result.Status() == "error" {
+		return nil, fmt.Errorf("all %d sub-collections failed", result.TotalSections)
+	}
+
+	snapshotData := map[string]interface{}{}
+	if version, ok := result.Sections["version"]; ok {
+		snapshotData["version"] = version
+	}
+	if health, ok := result.Sections["health"]; ok {
 		snapshotData["health"] = health
-		snapshotData["srdf_groups"] = extractNestedList(srdfLinks, "rdfGroupID")
-		alertList = extractPowerMaxAlerts(alerts)
+	}
+	if srdf, ok := result.Sections["srdf_groups"]; ok {
+		snapshotData["srdf_groups"] = extractNestedList(srdf.(map[string]interface{}), "rdfGroupID")
+	}
+
+	if marker := result.DegradedMarker(); marker != nil {
+		snapshotData["_collection_status"] = marker
+	}
+
+	var alertList []map[string]interface{}
+	if alerts, ok := result.Sections["alerts"]; ok {
+		alertList = extractPowerMaxAlerts(alerts.(map[string]interface{}))
 	}
 
 	return map[string]interface{}{
@@ -92,6 +126,7 @@ func (a *PowerMaxAdapter) Collect() (map[string]interface{}, error) {
 		"snapshotData": snapshotData,
 		"alerts":       alertList,
 		"collectedAt":  now,
+		"_subCalls":    result.SubCalls,
 	}, nil
 }
 
