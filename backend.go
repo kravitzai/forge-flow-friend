@@ -18,6 +18,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -64,7 +65,7 @@ func (b *BackendClient) Post(token string, payload map[string]interface{}) error
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return wrapConnectivityError("post", err)
 	}
 	defer resp.Body.Close()
 
@@ -103,7 +104,7 @@ func (b *BackendClient) FetchDesiredState(token string, capManifestJSON ...strin
 
 	resp, err := b.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("fetch desired state: %w", err)
+		return nil, wrapConnectivityError("fetch desired state", err)
 	}
 	defer resp.Body.Close()
 
@@ -182,6 +183,20 @@ func (b *BackendClient) SendAcknowledgement(token string, ack AckPayload) error 
 	}
 
 	return nil
+}
+
+// wrapConnectivityError provides actionable guidance for common network failures.
+func wrapConnectivityError(op string, err error) error {
+	msg := err.Error()
+	if strings.Contains(msg, "no such host") || strings.Contains(msg, "i/o timeout") ||
+		strings.Contains(msg, "lookup") {
+		return fmt.Errorf("%s: DNS resolution failed — verify the host's DNS configuration "+
+			"(nameservers in /etc/resolv.conf) and network connectivity: %w", op, err)
+	}
+	if strings.Contains(msg, "connection refused") {
+		return fmt.Errorf("%s: connection refused — backend may be unreachable from this network: %w", op, err)
+	}
+	return fmt.Errorf("%s: %w", op, err)
 }
 
 // FetchUpdateManifest retrieves the latest update manifest from the backend.
