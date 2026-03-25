@@ -97,9 +97,13 @@ func NewProxmoxClient(cfg *Config) *ProxmoxClient {
 	if cfg.InsecureSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+	timeout := 90 * time.Second
+	if cfg.TimeoutSecs > 0 {
+		timeout = time.Duration(cfg.TimeoutSecs) * time.Second
+	}
 	return &ProxmoxClient{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 60 * time.Second, Transport: transport},
+		httpClient: &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 

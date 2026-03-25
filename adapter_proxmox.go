@@ -52,6 +52,7 @@ func (a *ProxmoxAdapter) Init(profile *TargetProfile, creds map[string]string) e
 		cfg.ProxmoxTokenSecret = v
 	}
 
+	cfg.TimeoutSecs = profile.ResourceLimits.TimeoutSecs
 	a.cfg = cfg
 	a.client = NewProxmoxClient(cfg)
 
