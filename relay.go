@@ -84,7 +84,8 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"powermax":   true,
 			"nexus":      true,
 			"ndfc":       true,
-			"brocade":    true,
+			"brocade":      true,
+			"powerswitch":  true,
 		},
 
 	}
