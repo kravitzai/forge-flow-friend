@@ -225,16 +225,20 @@ func (sm *SyncManager) Stop() {
 // commandPollLoop is a dedicated fast-polling goroutine for relay commands.
 // Runs independently of the 60s config sync to achieve <5s command pickup latency.
 func (sm *SyncManager) commandPollLoop(ctx context.Context) {
+	log.Printf("[cmd-poll] Command poll loop started (idle: 3s, fast: 1s)")
+
 	const idleInterval = 3 * time.Second
 	const fastInterval = 1 * time.Second
 	const fastDuration = 15 * time.Second
 
 	pollInterval := idleInterval
 	var fastUntil time.Time
+	var lastErrLog time.Time
 
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("[cmd-poll] Command poll loop stopped")
 			return
 		case <-time.After(pollInterval):
 		}
@@ -246,7 +250,11 @@ func (sm *SyncManager) commandPollLoop(ctx context.Context) {
 
 		commands, err := sm.backend.CheckCommands(token)
 		if err != nil {
-			// Silent on transient errors — don't spam logs every 3s
+			// Throttled error logging — at most once per 30s to avoid spam
+			if time.Since(lastErrLog) > 30*time.Second {
+				log.Printf("[cmd-poll] CheckCommands error: %v", err)
+				lastErrLog = time.Now()
+			}
 			continue
 		}
 
