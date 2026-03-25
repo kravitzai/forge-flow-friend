@@ -28,6 +28,7 @@ const (
 	defaultEnrollPath        = "/functions/v1/connector-enroll"
 	defaultDesiredStatePath  = "/functions/v1/connector-desired-state"
 	defaultUpdateCheckPath   = "/functions/v1/connector-update-check"
+	defaultCheckCommandsPath = "/functions/v1/connector-check-commands"
 )
 
 // BackendClient handles communication with the ForgeAI backend.
@@ -234,5 +235,47 @@ func (b *BackendClient) FetchUpdateManifest(token string) (*SignedUpdateManifest
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("update check HTTP %d: %s", resp.StatusCode, string(body))
+	}
+}
+
+// CheckCommands polls the lightweight command-check endpoint for pending relay commands.
+// Returns empty slice (not error) when no commands are pending — designed for 3s polling.
+func (b *BackendClient) CheckCommands(token string) ([]RelayCommand, error) {
+	url := b.BaseURL + defaultCheckCommandsPath
+
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("create check-commands request: %w", err)
+	}
+	req.Header.Set("X-Connector-Token", token)
+	req.Header.Set("X-Agent-Version", HostVersion)
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := b.client.Do(req)
+	if err != nil {
+		return nil, wrapConnectivityError("check-commands", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	switch resp.StatusCode {
+	case 200:
+		var result struct {
+			Commands []RelayCommand `json:"commands"`
+		}
+		if err := json.Unmarshal(body, &result); err != nil {
+			return nil, fmt.Errorf("parse check-commands response: %w", err)
+		}
+		return result.Commands, nil
+	case 204:
+		return nil, nil
+	case 401:
+		return nil, fmt.Errorf("check-commands: token invalid or revoked")
+	case 404:
+		// Endpoint not deployed yet — silent
+		return nil, nil
+	default:
+		return nil, fmt.Errorf("check-commands HTTP %d: %s", resp.StatusCode, string(body))
 	}
 }
