@@ -106,6 +106,7 @@ func main() {
 	supervisor.RegisterAdapter("brocade", NewBrocadeAdapter)
 	supervisor.RegisterAdapter("powerswitch", NewPowerSwitchAdapter)
 	supervisor.RegisterAdapter("infiniband", NewInfiniBandAdapter)
+	supervisor.RegisterAdapter("bluefield", NewBlueFieldAdapter)
 
 	// ── Enrollment / State Loading ──
 	// Priority:
