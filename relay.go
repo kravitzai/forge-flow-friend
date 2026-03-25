@@ -81,6 +81,7 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"prometheus": true,
 			"grafana":    true,
 			"kubernetes": true,
+			"powermax":   true,
 		},
 	}
 }
