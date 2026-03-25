@@ -144,6 +144,7 @@ type Config struct {
 	PollIntervalSecs   int
 	InsecureSkipVerify bool
 	LogLevel           string
+	TimeoutSecs        int // 0 = use adapter default
 }
 
 // legacyConfigFromEnv builds a Config from environment variables for backward compatibility.

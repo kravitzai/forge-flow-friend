@@ -37,7 +37,11 @@ func (a *OllamaAdapter) Init(profile *TargetProfile, creds map[string]string) er
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: profile.TLS.InsecureSkipVerify},
 	}
-	a.client = &http.Client{Transport: transport, Timeout: 10 * time.Second}
+	timeout := 15 * time.Second
+	if profile.ResourceLimits.TimeoutSecs > 0 {
+		timeout = time.Duration(profile.ResourceLimits.TimeoutSecs) * time.Second
+	}
+	a.client = &http.Client{Transport: transport, Timeout: timeout}
 
 	// Optional header auth (for proxied setups)
 	if name := creds["header_name"]; name != "" {

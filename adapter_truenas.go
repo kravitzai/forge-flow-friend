@@ -27,6 +27,7 @@ func (a *TrueNASAdapter) Init(profile *TargetProfile, creds map[string]string) e
 		TrueNASURL:         profile.Endpoint,
 		InsecureSkipVerify: profile.TLS.InsecureSkipVerify,
 		PollIntervalSecs:   profile.PollIntervalSecs,
+		TimeoutSecs:        profile.ResourceLimits.TimeoutSecs,
 	}
 
 	// Extract credentials — UI stores as "api_token", legacy uses "api_key"

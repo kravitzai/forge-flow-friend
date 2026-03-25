@@ -121,9 +121,13 @@ func NewTrueNASClient(cfg *Config) *TrueNASClient {
 	if cfg.InsecureSkipVerify {
 		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
 	}
+	timeout := 30 * time.Second
+	if cfg.TimeoutSecs > 0 {
+		timeout = time.Duration(cfg.TimeoutSecs) * time.Second
+	}
 	return &TrueNASClient{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 30 * time.Second, Transport: transport},
+		httpClient: &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 
