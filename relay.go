@@ -83,7 +83,9 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"kubernetes": true,
 			"powermax":   true,
 			"nexus":      true,
+			"ndfc":       true,
 		},
+
 	}
 }
 
