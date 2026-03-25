@@ -80,6 +80,7 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"openwebui":  true,
 			"prometheus": true,
 			"grafana":    true,
+			"kubernetes": true,
 		},
 	}
 }
