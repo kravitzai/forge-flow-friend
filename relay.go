@@ -86,6 +86,7 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"ndfc":       true,
 			"brocade":      true,
 			"powerswitch":  true,
+			"infiniband":   true,
 		},
 
 	}
