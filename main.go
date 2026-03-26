@@ -18,6 +18,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"os/signal"
@@ -29,6 +30,14 @@ import (
 )
 
 func main() {
+	// Handle --version flag before any other initialization
+	for _, arg := range os.Args[1:] {
+		if arg == "--version" || arg == "-v" {
+			fmt.Printf("ForgeAI Connector Host %s\n", HostVersion)
+			os.Exit(0)
+		}
+	}
+
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
 	log.Printf("[host] ForgeAI Connector Host v%s starting", HostVersion)
 

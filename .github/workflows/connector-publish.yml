@@ -98,6 +98,8 @@ jobs:
           context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
           labels: |
             org.opencontainers.image.source=https://github.com/kravitzai/forge-flow-friend
             org.opencontainers.image.description=ForgeAI Connector Host — Multi-Target Agent
@@ -130,7 +132,7 @@ jobs:
           CGO_ENABLED: "0"
         run: |
           OUTNAME="connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}"
-          go build -ldflags="-s -w" -o "$OUTNAME" .
+          go build -ldflags="-s -w -X main.HostVersion=${{ github.ref_name }}" -o "$OUTNAME" .
           tar czf "${OUTNAME}.tar.gz" "$OUTNAME"
 
       - name: Upload to release

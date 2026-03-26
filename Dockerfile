@@ -7,7 +7,10 @@ WORKDIR /build
 COPY go.mod go.sum ./
 COPY *.go ./
 
-RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o connector-agent .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 GOOS=linux go build \
+  -ldflags="-s -w -X main.HostVersion=${VERSION}" \
+  -o connector-agent .
 
 # ── Runtime ──
 FROM alpine:3.20

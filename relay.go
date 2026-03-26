@@ -11,17 +11,16 @@
 package main
 
 import (
-	"crypto/tls"
-)
-
-import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -134,6 +133,11 @@ func (rh *RelayHandler) ProcessCommands(commands []RelayCommand) {
 // executeCommand runs a single relay command locally.
 func (rh *RelayHandler) executeCommand(cmd RelayCommand) RelayResult {
 	start := time.Now()
+
+	// ── System commands (restart, etc.) ──
+	if cmd.Platform == "system" {
+		return rh.executeSystemCommand(cmd, start)
+	}
 
 	// Platform allow-list check
 	if !rh.allowedPlatforms[cmd.Platform] {
@@ -271,6 +275,50 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 	}
 
 	return result
+}
+
+// executeSystemCommand handles platform="system" commands (restart, version, etc.).
+func (rh *RelayHandler) executeSystemCommand(cmd RelayCommand, start time.Time) RelayResult {
+	switch cmd.OperationID {
+	case "agent-restart":
+		log.Printf("[relay] ⚡ System command: agent-restart (cmd=%s)", cmd.ID)
+		result := RelayResult{
+			ID:             cmd.ID,
+			ResponseStatus: 200,
+			ResponseData: map[string]interface{}{
+				"message": "Agent restart initiated",
+				"version": HostVersion,
+			},
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+		// Post the ack result immediately before terminating
+		rh.postResults([]RelayResult{result})
+		log.Printf("[relay] Restart acknowledgment sent — terminating process in 2s")
+		go func() {
+			time.Sleep(2 * time.Second)
+			p, _ := os.FindProcess(os.Getpid())
+			p.Signal(syscall.SIGTERM)
+		}()
+		// Return a dummy result (already posted above)
+		return RelayResult{ID: cmd.ID, ResponseStatus: 200}
+
+	case "agent-version":
+		return RelayResult{
+			ID:             cmd.ID,
+			ResponseStatus: 200,
+			ResponseData: map[string]interface{}{
+				"version": HostVersion,
+			},
+			DurationMs: time.Since(start).Milliseconds(),
+		}
+
+	default:
+		return RelayResult{
+			ID:           cmd.ID,
+			ErrorMessage: fmt.Sprintf("unknown system operation %q", cmd.OperationID),
+			DurationMs:   time.Since(start).Milliseconds(),
+		}
+	}
 }
 
 // applyAuth sets authentication headers based on target config.

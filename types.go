@@ -11,9 +11,8 @@ import (
 
 // ── Agent metadata ──
 
-const (
-	HostVersion = "0.7.0"
-)
+// HostVersion is overridden at build time via -ldflags "-X main.HostVersion=..."
+var HostVersion = "0.7.0-dev"
 
 // ── Host Identity ──
 
