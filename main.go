@@ -107,6 +107,7 @@ func main() {
 	supervisor.RegisterAdapter("powerswitch", NewPowerSwitchAdapter)
 	supervisor.RegisterAdapter("infiniband", NewInfiniBandAdapter)
 	supervisor.RegisterAdapter("bluefield", NewBlueFieldAdapter)
+	supervisor.RegisterAdapter("dell-idrac", NewIdracAdapter)
 
 	// ── Enrollment / State Loading ──
 	// Priority:
