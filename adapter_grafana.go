@@ -6,7 +6,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,14 +29,11 @@ func (a *GrafanaAdapter) Init(profile *TargetProfile, creds map[string]string) e
 	a.profile = profile
 	a.baseURL = profile.Endpoint
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: profile.TLS.InsecureSkipVerify},
-	}
 	timeout := 15 * time.Second
 	if profile.ResourceLimits.TimeoutSecs > 0 {
 		timeout = time.Duration(profile.ResourceLimits.TimeoutSecs) * time.Second
 	}
-	a.client = &http.Client{Transport: transport, Timeout: timeout}
+	a.client = NewHTTPClientFromProfile(profile, timeout)
 
 	// Auth: API token or header-based
 	if t := creds["api_token"]; t != "" {

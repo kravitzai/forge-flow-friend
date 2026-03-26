@@ -12,7 +12,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -106,26 +105,21 @@ func (a *GenericHTTPAdapter) Init(profile *TargetProfile, creds map[string]strin
 	}
 
 	// No-redirect client to prevent unexpected host access
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: profile.TLS.InsecureSkipVerify},
-	}
-	a.client = &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// Only allow same-host redirects
-			if len(via) > 0 {
-				origHost := via[0].URL.Host
-				if req.URL.Host != origHost {
-					return fmt.Errorf("redirect to different host blocked: %s", req.URL.Host)
-				}
+	client := NewHTTPClientFromProfile(profile, timeout)
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		// Only allow same-host redirects
+		if len(via) > 0 {
+			origHost := via[0].URL.Host
+			if req.URL.Host != origHost {
+				return fmt.Errorf("redirect to different host blocked: %s", req.URL.Host)
 			}
-			if len(via) >= 3 {
-				return fmt.Errorf("too many redirects")
-			}
-			return nil
-		},
+		}
+		if len(via) >= 3 {
+			return fmt.Errorf("too many redirects")
+		}
+		return nil
 	}
+	a.client = client
 
 	log.Printf("[generic-http:%s] Configured with %d allowed paths, timeout %ds",
 		profile.Name, len(a.guardrails.AllowedPaths), a.guardrails.TimeoutSecs)

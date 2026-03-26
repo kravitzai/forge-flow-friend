@@ -6,7 +6,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,14 +31,11 @@ func (a *NdfcAdapter) Init(profile *TargetProfile, creds map[string]string) erro
 	a.profile = profile
 	a.baseURL = profile.Endpoint
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: profile.TLS.InsecureSkipVerify},
-	}
 	timeout := 20 * time.Second
 	if profile.ResourceLimits.TimeoutSecs > 0 {
 		timeout = time.Duration(profile.ResourceLimits.TimeoutSecs) * time.Second
 	}
-	a.client = &http.Client{Transport: transport, Timeout: timeout}
+	a.client = NewHTTPClientFromProfile(profile, timeout)
 
 	a.user = creds["username"]
 	a.pass = creds["password"]

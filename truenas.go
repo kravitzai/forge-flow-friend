@@ -9,7 +9,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -117,17 +116,14 @@ type TrueNASClient struct {
 }
 
 func NewTrueNASClient(cfg *Config) *TrueNASClient {
-	transport := &http.Transport{}
-	if cfg.InsecureSkipVerify {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
 	timeout := 30 * time.Second
 	if cfg.TimeoutSecs > 0 {
 		timeout = time.Duration(cfg.TimeoutSecs) * time.Second
 	}
+	tlsCfg := &TLSConfig{InsecureSkipVerify: cfg.InsecureSkipVerify}
 	return &TrueNASClient{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: timeout, Transport: transport},
+		httpClient: NewHTTPClient(tlsCfg, nil, timeout),
 	}
 }
 

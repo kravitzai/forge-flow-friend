@@ -6,7 +6,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -31,14 +30,11 @@ func (a *PrometheusAdapter) Init(profile *TargetProfile, creds map[string]string
 	a.baseURL = profile.Endpoint
 	a.headers = make(map[string]string)
 
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: profile.TLS.InsecureSkipVerify},
-	}
 	timeout := 10 * time.Second
 	if profile.ResourceLimits.TimeoutSecs > 0 {
 		timeout = time.Duration(profile.ResourceLimits.TimeoutSecs) * time.Second
 	}
-	a.client = &http.Client{Transport: transport, Timeout: timeout}
+	a.client = NewHTTPClientFromProfile(profile, timeout)
 
 	// Auth: header-based or username/password (basic auth)
 	if name := creds["header_name"]; name != "" {

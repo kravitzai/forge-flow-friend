@@ -6,7 +6,6 @@
 package main
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -93,17 +92,14 @@ type ProxmoxClient struct {
 }
 
 func NewProxmoxClient(cfg *Config) *ProxmoxClient {
-	transport := &http.Transport{}
-	if cfg.InsecureSkipVerify {
-		transport.TLSClientConfig = &tls.Config{InsecureSkipVerify: true}
-	}
 	timeout := 90 * time.Second
 	if cfg.TimeoutSecs > 0 {
 		timeout = time.Duration(cfg.TimeoutSecs) * time.Second
 	}
+	tlsCfg := &TLSConfig{InsecureSkipVerify: cfg.InsecureSkipVerify}
 	return &ProxmoxClient{
 		cfg:        cfg,
-		httpClient: &http.Client{Timeout: timeout, Transport: transport},
+		httpClient: NewHTTPClient(tlsCfg, nil, timeout),
 	}
 }
 
