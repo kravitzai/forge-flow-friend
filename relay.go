@@ -224,7 +224,12 @@ func (rh *RelayHandler) executeCommand(cmd RelayCommand) RelayResult {
 
 // executeHTTP performs the actual HTTP request against the target endpoint.
 func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, creds map[string]string) RelayResult {
-	fullURL := target.Endpoint + cmd.Path
+	// Platform-specific dispatch — some platforms use non-REST transports
+	if target.TargetType == "truenas" {
+		return rh.executeTrueNAS(cmd, target, creds)
+	}
+
+	fullURL := joinURL(target.Endpoint, cmd.Path)
 
 	var bodyReader io.Reader
 	if cmd.Body != nil && (strings.ToUpper(cmd.Method) == "POST" || strings.ToUpper(cmd.Method) == "PUT" || strings.ToUpper(cmd.Method) == "PATCH") {
@@ -288,6 +293,116 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 	}
 
 	return result
+}
+
+// executeTrueNAS handles TrueNAS relay commands via the REST API.
+// TrueNAS middleware method names (e.g. "system.info", "pool.query") are
+// translated to REST paths: system.info → GET /api/v2.0/system/info,
+// pool.query → GET /api/v2.0/pool.
+func (rh *RelayHandler) executeTrueNAS(cmd RelayCommand, target *TargetProfile, creds map[string]string) RelayResult {
+	method := cmd.Path // middleware method name, e.g. "system.info"
+
+	// Map middleware method to REST API v2 path
+	restPath := truenasMethodToREST(method)
+	fullURL := joinURL(target.Endpoint, "/api/v2.0/"+restPath)
+
+	req, err := http.NewRequest("GET", fullURL, nil)
+	if err != nil {
+		return RelayResult{ID: cmd.ID, ErrorMessage: fmt.Sprintf("create request: %v", err)}
+	}
+
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/json")
+
+	applyAuth(req, target, creds)
+
+	client := buildHTTPClient(target)
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return RelayResult{
+			ID:           cmd.ID,
+			ErrorMessage: fmt.Sprintf("execute request: %v", err),
+		}
+	}
+	defer resp.Body.Close()
+
+	limited := io.LimitReader(resp.Body, 5*1024*1024)
+	respBytes, err := io.ReadAll(limited)
+	if err != nil {
+		return RelayResult{
+			ID:             cmd.ID,
+			ResponseStatus: resp.StatusCode,
+			ErrorMessage:   fmt.Sprintf("read response: %v", err),
+		}
+	}
+
+	// TrueNAS REST API can return arrays (query endpoints) or objects
+	var respData map[string]interface{}
+	if err := json.Unmarshal(respBytes, &respData); err != nil {
+		// Try array response — wrap in a result envelope
+		var arrData []interface{}
+		if arrErr := json.Unmarshal(respBytes, &arrData); arrErr == nil {
+			respData = map[string]interface{}{"result": arrData}
+		} else {
+			respData = map[string]interface{}{"rawText": string(respBytes)}
+		}
+	}
+
+	result := RelayResult{
+		ID:             cmd.ID,
+		ResponseStatus: resp.StatusCode,
+		ResponseData:   respData,
+	}
+
+	if resp.StatusCode >= 400 {
+		result.ErrorMessage = fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode)
+	}
+
+	return result
+}
+
+// truenasMethodToREST converts a TrueNAS middleware method name to a REST API v2 path.
+// Examples:
+//   system.info       → system/info
+//   system.version    → system/version
+//   pool.query        → pool
+//   pool.dataset.query → pool/dataset
+//   disk.query        → disk
+//   sharing.smb.query → sharing/smb
+//   service.query     → service
+func truenasMethodToREST(method string) string {
+	// Split on "." — the last segment is the verb (info, query, get_instance, etc.)
+	parts := strings.Split(method, ".")
+	if len(parts) < 2 {
+		// Fallback: use as-is with slashes
+		return strings.ReplaceAll(method, ".", "/")
+	}
+
+	verb := parts[len(parts)-1]
+	resource := parts[:len(parts)-1]
+
+	// For "query" verbs, the REST endpoint is the resource itself (GET /pool)
+	// For "info", "version", etc., append the verb (GET /system/info)
+	switch verb {
+	case "query":
+		return strings.Join(resource, "/")
+	default:
+		return strings.Join(parts, "/")
+	}
+}
+
+// joinURL safely joins a base endpoint URL and a path segment,
+// ensuring exactly one "/" separator between them.
+func joinURL(base, path string) string {
+	base = strings.TrimRight(base, "/")
+	if path == "" {
+		return base
+	}
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+	return base + path
 }
 
 // NOTE: executeSystemCommand is defined in system_commands.go
