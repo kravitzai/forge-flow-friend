@@ -324,7 +324,20 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 	}
 
 	var respData map[string]interface{}
-	if err := json.Unmarshal(respBytes, &respData); err != nil {
+	if len(respBytes) == 0 {
+		// Empty body (e.g. HTTP 204 No Content)
+		if cmd.SafetyLevel == "change" && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			respData = map[string]interface{}{
+				"status":     "success",
+				"message":    "Action completed successfully",
+				"httpStatus": float64(resp.StatusCode),
+			}
+		} else {
+			respData = map[string]interface{}{
+				"rawText": "",
+			}
+		}
+	} else if err := json.Unmarshal(respBytes, &respData); err != nil {
 		// Non-JSON response
 		respData = map[string]interface{}{
 			"rawText": string(respBytes),
@@ -338,7 +351,17 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 	}
 
 	if resp.StatusCode >= 400 {
-		result.ErrorMessage = fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode)
+		// For change operations, HTTP 409 (Conflict) means "already in requested state" — treat as success
+		if cmd.SafetyLevel == "change" && resp.StatusCode == 409 {
+			result.ResponseData = map[string]interface{}{
+				"status":     "conflict",
+				"message":    "Target is already in the requested state",
+				"httpStatus": float64(409),
+			}
+			// No ErrorMessage — UI will treat this as success
+		} else {
+			result.ErrorMessage = fmt.Sprintf("upstream returned HTTP %d", resp.StatusCode)
+		}
 	}
 
 	return result
