@@ -41,13 +41,17 @@ func (f *fakeAdapter) Capabilities() []string {
 	return []string{"test"}
 }
 
-func (f *fakeAdapter) Close() {
+func (f *fakeAdapter) Close() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.closed = true
+	return nil
 }
 
-// --- Fake backend (no-op) ---
+func (f *fakeAdapter) HealthCheck() error {
+	return nil
+}
+
 
 type fakeBackendPost struct{}
 
@@ -167,7 +171,7 @@ func TestWorkerFailedInitDoesNotEmitRunning(t *testing.T) {
 // with a target. If the deadlock is present, this test will hang and
 // the test runner will time out.
 func TestSupervisorReconcileDoesNotDeadlock(t *testing.T) {
-	store := NewStore("/tmp/forgeai-test-deadlock-" + fmt.Sprintf("%d", time.Now().UnixNano()))
+	store, _ := NewStore("/tmp/forgeai-test-deadlock-" + fmt.Sprintf("%d", time.Now().UnixNano()))
 
 	backend := &BackendClient{BaseURL: "http://localhost:0"}
 	sup := NewSupervisor(store, backend)
@@ -228,7 +232,7 @@ func TestSupervisorReconcileDoesNotDeadlock(t *testing.T) {
 // TestSupervisorMultipleTargetsNoDeadlock verifies that reconciling
 // multiple targets simultaneously does not deadlock.
 func TestSupervisorMultipleTargetsNoDeadlock(t *testing.T) {
-	store := NewStore("/tmp/forgeai-test-multi-" + fmt.Sprintf("%d", time.Now().UnixNano()))
+	store, _ := NewStore("/tmp/forgeai-test-multi-" + fmt.Sprintf("%d", time.Now().UnixNano()))
 	backend := &BackendClient{BaseURL: "http://localhost:0"}
 	sup := NewSupervisor(store, backend)
 

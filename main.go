@@ -47,7 +47,10 @@ func main() {
 	}
 	InitAuditLogger(configLevel)
 
-	audit.Info("host.startup", fmt.Sprintf("ForgeAI Connector Host v%s starting", HostVersion))
+	execPath, _ := os.Executable()
+	audit.Info("host.startup", fmt.Sprintf("ForgeAI Connector Host v%s starting", HostVersion),
+		F("executable", execPath),
+		F("pid", os.Getpid()))
 
 	// ── Read remote action opt-in flags from environment ──
 	remoteLiveQuery := envBool("FORGEAI_REMOTE_LIVE_QUERY")

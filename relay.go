@@ -225,7 +225,10 @@ func (rh *RelayHandler) executeCommand(cmd RelayCommand) RelayResult {
 // executeHTTP performs the actual HTTP request against the target endpoint.
 func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, creds map[string]string) RelayResult {
 	// Platform-specific dispatch — some platforms use non-REST transports
-	if target.TargetType == "truenas" {
+	// Check both target type and command platform for robustness
+	normalizedTarget := strings.ToLower(strings.TrimSpace(target.TargetType))
+	normalizedPlatform := strings.ToLower(strings.TrimSpace(cmd.Platform))
+	if normalizedTarget == "truenas" || normalizedPlatform == "truenas" {
 		return rh.executeTrueNAS(cmd, target, creds)
 	}
 
@@ -305,6 +308,12 @@ func (rh *RelayHandler) executeTrueNAS(cmd RelayCommand, target *TargetProfile, 
 	// Map middleware method to REST API v2 path
 	restPath := truenasMethodToREST(method)
 	fullURL := joinURL(target.Endpoint, "/api/v2.0/"+restPath)
+
+	audit.Debug("relay.truenas", "TrueNAS dispatch",
+		F("cmd_id", cmd.ID),
+		F("middleware_method", method),
+		F("rest_path", restPath),
+		F("resolved_url", fullURL))
 
 	req, err := http.NewRequest("GET", fullURL, nil)
 	if err != nil {
