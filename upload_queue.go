@@ -8,7 +8,7 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -17,9 +17,9 @@ import (
 type UploadPriority int
 
 const (
-	PriorityHigh   UploadPriority = 0 // health, alerts, posture
-	PriorityMedium UploadPriority = 1 // interface/inventory summaries
-	PriorityLow    UploadPriority = 2 // large detailed inventories
+	PriorityHigh   UploadPriority = 0
+	PriorityMedium UploadPriority = 1
+	PriorityLow    UploadPriority = 2
 )
 
 // QueuedSnapshot is a snapshot waiting to be uploaded.
@@ -41,14 +41,11 @@ type UploadQueue struct {
 	maxSize  int
 	maxRetries int
 
-	// Backend for uploads
 	backend  *BackendClient
 
-	// Lifecycle
 	stopCh   chan struct{}
 	wg       sync.WaitGroup
 
-	// Upload worker config
 	workerCount   int
 	retryBackoff  time.Duration
 	maxBackoff    time.Duration
@@ -56,11 +53,11 @@ type UploadQueue struct {
 
 // UploadQueueConfig configures the upload queue.
 type UploadQueueConfig struct {
-	MaxSize      int           // max queued snapshots (default 100)
-	MaxRetries   int           // max retries per snapshot (default 3)
-	WorkerCount  int           // concurrent upload workers (default 2)
-	RetryBackoff time.Duration // initial retry backoff (default 5s)
-	MaxBackoff   time.Duration // max retry backoff (default 60s)
+	MaxSize      int
+	MaxRetries   int
+	WorkerCount  int
+	RetryBackoff time.Duration
+	MaxBackoff   time.Duration
 }
 
 func DefaultUploadQueueConfig() UploadQueueConfig {
@@ -73,7 +70,6 @@ func DefaultUploadQueueConfig() UploadQueueConfig {
 	}
 }
 
-// NewUploadQueue creates and starts an upload queue.
 func NewUploadQueue(backend *BackendClient, cfg UploadQueueConfig) *UploadQueue {
 	if cfg.MaxSize <= 0 {
 		cfg.MaxSize = 100
@@ -91,7 +87,7 @@ func NewUploadQueue(backend *BackendClient, cfg UploadQueueConfig) *UploadQueue 
 		cfg.MaxBackoff = 60 * time.Second
 	}
 
-	q := &UploadQueue{
+	return &UploadQueue{
 		items:        make([]*QueuedSnapshot, 0, cfg.MaxSize),
 		maxSize:      cfg.MaxSize,
 		maxRetries:   cfg.MaxRetries,
@@ -101,21 +97,17 @@ func NewUploadQueue(backend *BackendClient, cfg UploadQueueConfig) *UploadQueue 
 		retryBackoff: cfg.RetryBackoff,
 		maxBackoff:   cfg.MaxBackoff,
 	}
-
-	return q
 }
 
-// Start begins the upload worker goroutines.
 func (q *UploadQueue) Start() {
 	for i := 0; i < q.workerCount; i++ {
 		q.wg.Add(1)
 		go q.uploadWorker(i)
 	}
-	log.Printf("[upload-queue] Started %d upload workers (max_queue=%d, max_retries=%d)",
-		q.workerCount, q.maxSize, q.maxRetries)
+	audit.Info("upload.success", "Upload queue started",
+		F("workers", q.workerCount), F("max_queue", q.maxSize), F("max_retries", q.maxRetries))
 }
 
-// Stop gracefully drains and stops the upload queue.
 func (q *UploadQueue) Stop() {
 	close(q.stopCh)
 	q.wg.Wait()
@@ -125,14 +117,13 @@ func (q *UploadQueue) Stop() {
 	q.mu.Unlock()
 
 	if remaining > 0 {
-		log.Printf("[upload-queue] Stopped with %d undelivered snapshots", remaining)
+		audit.Warn("upload.failed", "Upload queue stopped with undelivered snapshots",
+			F("remaining", remaining))
 	} else {
-		log.Printf("[upload-queue] Stopped cleanly")
+		audit.Info("upload.success", "Upload queue stopped cleanly")
 	}
 }
 
-// Enqueue adds a snapshot to the upload queue.
-// Returns true if enqueued, false if dropped due to capacity.
 func (q *UploadQueue) Enqueue(token string, payload map[string]interface{}, priority UploadPriority) bool {
 	payloadBytes, _ := json.Marshal(payload)
 	sizeBytes := int64(len(payloadBytes))
@@ -153,13 +144,12 @@ func (q *UploadQueue) Enqueue(token string, payload map[string]interface{}, prio
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
-	// If at capacity, try to evict lowest priority item
 	if len(q.items) >= q.maxSize {
 		evicted := q.evictLowestPriority(priority)
 		if !evicted {
 			agentMetrics.RecordUploadDropped()
-			log.Printf("[upload-queue] DROPPED snapshot target=%s type=%s priority=%d (queue full, no lower priority to evict)",
-				targetID, targetType, priority)
+			audit.Error("upload.dropped", "Snapshot dropped (queue full, no lower priority to evict)",
+				F("target_id", targetID), F("target_type", targetType), F("priority", int(priority)))
 			return false
 		}
 	}
@@ -170,18 +160,15 @@ func (q *UploadQueue) Enqueue(token string, payload map[string]interface{}, prio
 	return true
 }
 
-// evictLowestPriority removes the oldest lowest-priority item if it's lower
-// priority than the incoming item. Caller must hold q.mu.
 func (q *UploadQueue) evictLowestPriority(incomingPriority UploadPriority) bool {
 	lowestIdx := -1
-	lowestPri := incomingPriority // only evict if something is lower priority
+	lowestPri := incomingPriority
 
 	for i, item := range q.items {
 		if item.Priority > lowestPri {
 			lowestPri = item.Priority
 			lowestIdx = i
 		} else if item.Priority == lowestPri && lowestIdx >= 0 {
-			// Same priority: evict older
 			if item.EnqueuedAt.Before(q.items[lowestIdx].EnqueuedAt) {
 				lowestIdx = i
 			}
@@ -195,13 +182,13 @@ func (q *UploadQueue) evictLowestPriority(incomingPriority UploadPriority) bool 
 	evicted := q.items[lowestIdx]
 	q.items = append(q.items[:lowestIdx], q.items[lowestIdx+1:]...)
 	agentMetrics.RecordUploadDropped()
-	log.Printf("[upload-queue] Evicted snapshot target=%s priority=%d age=%v to make room",
-		evicted.TargetID, evicted.Priority, time.Since(evicted.EnqueuedAt).Round(time.Second))
+	audit.Warn("upload.dropped", "Evicted snapshot to make room",
+		F("target_id", evicted.TargetID), F("priority", int(evicted.Priority)),
+		F("age", time.Since(evicted.EnqueuedAt).Round(time.Second).String()))
 
 	return true
 }
 
-// uploadWorker is the goroutine that drains items from the queue and uploads.
 func (q *UploadQueue) uploadWorker(workerID int) {
 	defer q.wg.Done()
 
@@ -214,7 +201,6 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 
 		item := q.dequeue()
 		if item == nil {
-			// No work — sleep briefly
 			select {
 			case <-q.stopCh:
 				return
@@ -230,15 +216,16 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 
 			if item.Retries >= q.maxRetries {
 				agentMetrics.RecordUploadDropped()
-				log.Printf("[upload-queue] worker=%d DROPPED snapshot target=%s after %d retries: %v",
-					workerID, item.TargetID, item.Retries, err)
+				audit.Error("upload.dropped", fmt.Sprintf("Dropped snapshot after %d retries", item.Retries),
+					F("target_id", item.TargetID), F("worker", workerID), Err(err))
 				continue
 			}
 
-			// Re-enqueue for retry
 			backoff := q.calculateRetryBackoff(item.Retries)
-			log.Printf("[upload-queue] worker=%d retry=%d/%d target=%s backoff=%v err=%v",
-				workerID, item.Retries, q.maxRetries, item.TargetID, backoff, err)
+			audit.Warn("upload.failed", "Upload retry scheduled",
+				F("target_id", item.TargetID), F("worker", workerID),
+				F("retry", item.Retries), F("max_retries", q.maxRetries),
+				F("backoff", backoff.String()), Err(err))
 
 			select {
 			case <-q.stopCh:
@@ -252,8 +239,8 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 				agentMetrics.SetQueueDepth(len(q.items))
 			} else {
 				agentMetrics.RecordUploadDropped()
-				log.Printf("[upload-queue] worker=%d DROPPED retry snapshot target=%s (queue full)",
-					workerID, item.TargetID)
+				audit.Error("upload.dropped", "Dropped retry snapshot (queue full)",
+					F("target_id", item.TargetID), F("worker", workerID))
 			}
 			q.mu.Unlock()
 		} else {
@@ -262,7 +249,6 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 	}
 }
 
-// dequeue removes and returns the highest-priority (lowest number) oldest item.
 func (q *UploadQueue) dequeue() *QueuedSnapshot {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -271,7 +257,6 @@ func (q *UploadQueue) dequeue() *QueuedSnapshot {
 		return nil
 	}
 
-	// Find highest priority (lowest value), oldest item
 	bestIdx := 0
 	for i := 1; i < len(q.items); i++ {
 		if q.items[i].Priority < q.items[bestIdx].Priority {
@@ -300,7 +285,6 @@ func (q *UploadQueue) calculateRetryBackoff(retries int) time.Duration {
 	return backoff
 }
 
-// Depth returns the current queue depth.
 func (q *UploadQueue) Depth() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -309,14 +293,11 @@ func (q *UploadQueue) Depth() int {
 
 // ── Priority Classification Helpers ──
 
-// ClassifySnapshotPriority determines the upload priority for a snapshot payload.
 func ClassifySnapshotPriority(payload map[string]interface{}) UploadPriority {
-	// Heartbeats are always high priority
 	if payloadType, _ := payload["type"].(string); payloadType == "heartbeat" {
 		return PriorityHigh
 	}
 
-	// Check for alerts — presence of alerts bumps to high
 	if alerts, ok := payload["alerts"]; ok {
 		if alertList, ok := alerts.([]map[string]interface{}); ok && len(alertList) > 0 {
 			return PriorityHigh
@@ -326,16 +307,14 @@ func ClassifySnapshotPriority(payload map[string]interface{}) UploadPriority {
 		}
 	}
 
-	// Check if snapshot has degraded marker
 	if snapshotData, ok := payload["snapshotData"].(map[string]interface{}); ok {
 		if _, hasDegraded := snapshotData["_collection_status"]; hasDegraded {
 			return PriorityHigh
 		}
 	}
 
-	// Large payloads are lower priority
 	if data, err := json.Marshal(payload); err == nil {
-		if len(data) > 500*1024 { // > 500KB
+		if len(data) > 500*1024 {
 			return PriorityLow
 		}
 	}

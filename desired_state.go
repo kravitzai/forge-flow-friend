@@ -14,7 +14,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 )
@@ -27,140 +26,80 @@ func contains(s, substr string) bool {
 // ── Desired-State Payload Model ──
 
 // DesiredStatePayload is the backend → host config-only payload.
-// It is declarative: describes what should be, not what to do.
 type DesiredStatePayload struct {
-	// Revision for diffing desired vs current
-	Revision     int64  `json:"revision"`
-	RevisionHash string `json:"revision_hash,omitempty"`
-
-	// Host-level config overrides
-	HostConfig *HostConfigOverride `json:"host_config,omitempty"`
-
-	// Desired target profiles
-	Targets []DesiredTargetProfile `json:"targets"`
-
-	// Host-level policy
-	Policy *HostPolicy `json:"policy,omitempty"`
-
-	// Wipe instruction — explicit control-plane command for credential cleanup
-	WipeInstruction *WipeInstruction `json:"wipe_instruction,omitempty"`
-
-	// Pending relay commands — live API queries from users to execute locally
-	PendingCommands []RelayCommand `json:"pending_commands,omitempty"`
+	Revision        int64                `json:"revision"`
+	RevisionHash    string               `json:"revision_hash,omitempty"`
+	HostConfig      *HostConfigOverride  `json:"host_config,omitempty"`
+	Targets         []DesiredTargetProfile `json:"targets"`
+	Policy          *HostPolicy          `json:"policy,omitempty"`
+	WipeInstruction *WipeInstruction     `json:"wipe_instruction,omitempty"`
+	PendingCommands []RelayCommand       `json:"pending_commands,omitempty"`
 }
 
-// WipeInstruction is the control-plane command to wipe local credentials/state.
-// Only processed on explicit instruction — never on transient errors.
 type WipeInstruction struct {
-	Action      string `json:"action"`       // "wipe_local_credentials"
+	Action      string `json:"action"`
 	RequestedAt string `json:"requested_at"`
 	RequestedBy string `json:"requested_by"`
 }
 
-// HostConfigOverride allows backend to push safe config updates.
-// Only config knobs — never executable content.
 type HostConfigOverride struct {
-	LogLevel            string `json:"log_level,omitempty"`
-	SyncIntervalSecs    int    `json:"sync_interval_secs,omitempty"`
-	MaxConcurrentWorkers int   `json:"max_concurrent_workers,omitempty"`
+	LogLevel             string `json:"log_level,omitempty"`
+	SyncIntervalSecs     int    `json:"sync_interval_secs,omitempty"`
+	MaxConcurrentWorkers int    `json:"max_concurrent_workers,omitempty"`
 }
 
-// HostPolicy contains host-level policy settings from the control plane.
 type HostPolicy struct {
 	AutoUpdatePolicy       string `json:"auto_update_policy,omitempty"`
 	CredentialRotationDays int    `json:"credential_rotation_days,omitempty"`
 	MaintenanceWindow      string `json:"maintenance_window,omitempty"`
 }
 
-// DesiredTargetProfile is a backend-declared target profile.
-// It includes the common profile envelope + any target-specific config.
 type DesiredTargetProfile struct {
-	// Identity
-	TargetID string `json:"target_id"`
-	Name     string `json:"name"`
-
-	// Type & mode
-	TargetType string     `json:"target_type"`
-	Mode       ProfileMode `json:"mode"`
-
-	// State control
-	Enabled bool         `json:"enabled"`
-	Status  TargetStatus `json:"status,omitempty"`
-
-	// Endpoint
-	Endpoint string    `json:"endpoint"`
-	TLS      TLSConfig `json:"tls"`
-
-	// Polling
-	PollIntervalSecs int `json:"poll_interval_secs"`
-
-	// Labels & capabilities
-	Labels       map[string]string `json:"labels,omitempty"`
-	Capabilities []string          `json:"capabilities,omitempty"`
-
-	// Resource limits
-	ResourceLimits ResourceLimits `json:"resource_limits,omitempty"`
-
-	// Maintenance
-	Paused            bool   `json:"paused"`
-	MaintenanceReason string `json:"maintenance_reason,omitempty"`
-
-	// Auth config — declares expected auth type, not the secret itself
-	AuthType string `json:"auth_type"`
-
-	// Credential delivery — encrypted secret payload from backend
-	// These are transit-encrypted and stored locally by the host.
-	CredentialPayload *CredentialPayload `json:"credential_payload,omitempty"`
-
-	// Credential policy
-	CredentialRotationDays int `json:"credential_rotation_days,omitempty"`
-
-	// Target-specific config (opaque to host, interpreted by adapter)
-	TargetConfig map[string]interface{} `json:"target_config,omitempty"`
-
-	// Versioning
-	ConfigVersion int `json:"config_version"`
+	TargetID               string                 `json:"target_id"`
+	Name                   string                 `json:"name"`
+	TargetType             string                 `json:"target_type"`
+	Mode                   ProfileMode            `json:"mode"`
+	Enabled                bool                   `json:"enabled"`
+	Status                 TargetStatus           `json:"status,omitempty"`
+	Endpoint               string                 `json:"endpoint"`
+	TLS                    TLSConfig              `json:"tls"`
+	PollIntervalSecs       int                    `json:"poll_interval_secs"`
+	Labels                 map[string]string      `json:"labels,omitempty"`
+	Capabilities           []string               `json:"capabilities,omitempty"`
+	ResourceLimits         ResourceLimits         `json:"resource_limits,omitempty"`
+	Paused                 bool                   `json:"paused"`
+	MaintenanceReason      string                 `json:"maintenance_reason,omitempty"`
+	AuthType               string                 `json:"auth_type"`
+	CredentialPayload      *CredentialPayload     `json:"credential_payload,omitempty"`
+	CredentialRotationDays int                    `json:"credential_rotation_days,omitempty"`
+	TargetConfig           map[string]interface{} `json:"target_config,omitempty"`
+	ConfigVersion          int                    `json:"config_version"`
 }
 
-// CredentialPayload carries encrypted per-target secrets from backend → host.
-// Standard path: "host-keypair" with NaCl box encryption.
-// Deprecated: "token-scoped" (Phase 2 legacy, disabled for new hosts).
 type CredentialPayload struct {
-	// EncryptionMethod: "host-keypair" (standard), "token-scoped" (deprecated),
-	// "unavailable" (host missing public key), "error" (encryption failure)
-	EncryptionMethod string            `json:"encryption_method"`
-
-	// Token-scoped (DEPRECATED — migration only, will be removed)
-	Credentials      map[string]string `json:"credentials,omitempty"`
-
-	// Host-keypair encrypted blob (senderPub + nonce + ciphertext, base64)
-	EncryptedBlob    string            `json:"encrypted_blob,omitempty"`
-
-	// Versioned envelope (Phase 4+) — preferred over raw blob
+	EncryptionMethod string             `json:"encryption_method"`
+	Credentials      map[string]string  `json:"credentials,omitempty"`
+	EncryptedBlob    string             `json:"encrypted_blob,omitempty"`
 	Envelope         *CredentialEnvelope `json:"envelope,omitempty"`
 }
 
-// CredentialEnvelope is the versioned encrypted credential payload format.
-// Format version "ecpv1": X25519-XSalsa20-Poly1305 (NaCl box)
 type CredentialEnvelope struct {
-	Format          string `json:"format"`            // "ecpv1"
+	Format          string `json:"format"`
 	TargetID        string `json:"target_id"`
-	Algorithm       string `json:"algorithm"`         // "x25519-xsalsa20-poly1305"
-	SenderPublicKey string `json:"sender_public_key"` // base64, 32 bytes
-	Nonce           string `json:"nonce"`             // base64, 24 bytes
-	Ciphertext      string `json:"ciphertext"`        // base64
+	Algorithm       string `json:"algorithm"`
+	SenderPublicKey string `json:"sender_public_key"`
+	Nonce           string `json:"nonce"`
+	Ciphertext      string `json:"ciphertext"`
 }
 
-// WipeAckPayload reports wipe result back to control plane.
 type WipeAckPayload struct {
-	Status       string `json:"status"`         // completed, failed
+	Status       string `json:"status"`
 	Error        string `json:"error,omitempty"`
 	WipedTargets int    `json:"wiped_targets"`
 }
 
 // ── Desired-State Sync Loop ──
 
-// SyncManager handles periodic desired-state fetching and reconciliation.
 type SyncManager struct {
 	backend      *BackendClient
 	store        *Store
@@ -169,25 +108,20 @@ type SyncManager struct {
 	hostKeyPair  *HostKeyPair
 	relayHandler *RelayHandler
 	interval     time.Duration
-	fastInterval time.Duration // shorter interval when relay commands were received
+	fastInterval time.Duration
 	cancel       context.CancelFunc
 	done         chan struct{}
-	// fastPollUntil: when set to a future time, use fastInterval instead of interval
 	fastPollUntil time.Time
-	// lastRejected tracks profiles rejected during the most recent sync cycle,
-	// so sendAck can report them with error status to the control plane.
 	lastRejected []RejectedProfile
 }
 
-// NewSyncManager creates a sync manager.
 func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor) *SyncManager {
-	// Load host keypair for credential decryption
 	kp, err := store.LoadKeyPair()
 	if err != nil {
-		log.Printf("[sync] WARNING: Failed to load host keypair: %v", err)
+		audit.Warn("sync.error", "Failed to load host keypair", Err(err))
 	}
 	if kp != nil {
-		log.Printf("[sync] Host keypair loaded for credential decryption")
+		audit.Info("sync.reconciled", "Host keypair loaded for credential decryption")
 	}
 
 	return &SyncManager{
@@ -203,7 +137,6 @@ func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor
 	}
 }
 
-// Start begins the sync loop.
 func (sm *SyncManager) Start(interval time.Duration) {
 	if interval > 0 {
 		sm.interval = interval
@@ -214,10 +147,10 @@ func (sm *SyncManager) Start(interval time.Duration) {
 
 	go sm.run(ctx)
 	go sm.commandPollLoop(ctx)
-	log.Printf("[sync] Desired-state sync started (interval: %v, fast: %v, cmd-poll: 3s)", sm.interval, sm.fastInterval)
+	audit.Info("sync.reconciled", "Desired-state sync started",
+		F("interval", sm.interval.String()), F("fast_interval", sm.fastInterval.String()))
 }
 
-// Stop halts the sync loop.
 func (sm *SyncManager) Stop() {
 	if sm.cancel != nil {
 		sm.cancel()
@@ -225,10 +158,8 @@ func (sm *SyncManager) Stop() {
 	}
 }
 
-// commandPollLoop is a dedicated fast-polling goroutine for relay commands.
-// Runs independently of the 60s config sync to achieve <5s command pickup latency.
 func (sm *SyncManager) commandPollLoop(ctx context.Context) {
-	log.Printf("[cmd-poll] Command poll loop started (idle: 3s, fast: 1s)")
+	audit.Debug("sync.reconciled", "Command poll loop started")
 
 	const idleInterval = 3 * time.Second
 	const fastInterval = 1 * time.Second
@@ -241,7 +172,7 @@ func (sm *SyncManager) commandPollLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("[cmd-poll] Command poll loop stopped")
+			audit.Debug("sync.reconciled", "Command poll loop stopped")
 			return
 		case <-time.After(pollInterval):
 		}
@@ -253,16 +184,15 @@ func (sm *SyncManager) commandPollLoop(ctx context.Context) {
 
 		commands, err := sm.backend.CheckCommands(token)
 		if err != nil {
-			// Throttled error logging — at most once per 30s to avoid spam
 			if time.Since(lastErrLog) > 30*time.Second {
-				log.Printf("[cmd-poll] CheckCommands error: %v", err)
+				audit.Warn("sync.error", "CheckCommands error", Err(err))
 				lastErrLog = time.Now()
 			}
 			continue
 		}
 
 		if len(commands) > 0 {
-			log.Printf("[cmd-poll] Found %d pending command(s)", len(commands))
+			audit.Info("sync.reconciled", "Found pending commands", F("count", len(commands)))
 			sm.relayHandler.ProcessCommands(commands)
 			fastUntil = time.Now().Add(fastDuration)
 		}
@@ -278,11 +208,9 @@ func (sm *SyncManager) commandPollLoop(ctx context.Context) {
 func (sm *SyncManager) run(ctx context.Context) {
 	defer close(sm.done)
 
-	// Fetch immediately on start
 	sm.fetchAndReconcile()
 
 	for {
-		// Use fast interval if we recently processed relay commands
 		pollInterval := sm.interval
 		if time.Now().Before(sm.fastPollUntil) {
 			pollInterval = sm.fastInterval
@@ -297,114 +225,85 @@ func (sm *SyncManager) run(ctx context.Context) {
 	}
 }
 
-// fetchAndReconcile fetches desired state and reconciles.
 func (sm *SyncManager) fetchAndReconcile() {
 	token := sm.supervisor.GetConnectorToken()
 	if token == "" {
-		log.Printf("[sync] No connector token — skipping sync")
+		audit.Warn("sync.error", "No connector token — skipping sync")
 		return
 	}
 
-	// Build capability manifest JSON for control-plane reporting
 	manifest := sm.supervisor.BuildCapabilityManifest()
 	manifestJSON, _ := json.Marshal(manifest)
 
 	payload, err := sm.backend.FetchDesiredState(token, string(manifestJSON))
 	if err != nil {
-		log.Printf("[sync] Desired-state fetch failed: %v", err)
+		audit.Error("sync.error", "Desired-state fetch failed", Err(err))
 
-		// Provide actionable guidance for auth failures vs transient errors
 		errStr := err.Error()
 		if contains(errStr, "token invalid") || contains(errStr, "revoked") || contains(errStr, "authentication failed") {
-			log.Printf("[sync] ── Likely cause ──")
-			log.Printf("[sync]   The stored connector token appears invalid or revoked.")
-			log.Printf("[sync]   This commonly happens when:")
-			log.Printf("[sync]     1. The host registration was deleted from the ForgeAI dashboard")
-			log.Printf("[sync]     2. The connector token was revoked")
-			log.Printf("[sync]     3. This container/service was reinstalled with an existing volume")
-			log.Printf("[sync]        that contains stale enrollment state from a previous host")
-			log.Printf("[sync] ── Recovery steps ──")
-			log.Printf("[sync]   Docker named volume:")
-			log.Printf("[sync]     docker stop forgeai-host && docker rm forgeai-host")
-			log.Printf("[sync]     docker volume rm forgeai-config")
-			log.Printf("[sync]     docker run ... -e FORGEAI_ENROLLMENT_TOKEN='fgbt_new_token' ...")
-			log.Printf("[sync]   Bind mount / systemd:")
-			log.Printf("[sync]     sudo systemctl stop forgeai-host")
-			log.Printf("[sync]     sudo rm -rf /etc/forgeai/host.json.enc /etc/forgeai/host.key /etc/forgeai/secrets/")
-			log.Printf("[sync]     # Update FORGEAI_ENROLLMENT_TOKEN in /etc/forgeai/connector.env")
-			log.Printf("[sync]     sudo systemctl start forgeai-host")
-			log.Printf("[sync]   Or run with --force-reset-state to clear persisted state automatically.")
-			log.Printf("[sync] ────────────────────")
+			audit.Error("sync.error", "Stored connector token appears invalid or revoked — see --force-reset-state for recovery")
 		} else {
-			log.Printf("[sync] Preserving existing local state (safe degradation)")
+			audit.Info("sync.reconciled", "Preserving existing local state (safe degradation)")
 		}
 		return
 	}
 
 	if payload == nil {
-		log.Printf("[sync] Empty desired-state — no changes")
+		audit.Debug("sync.reconciled", "Empty desired-state — no changes")
 		return
 	}
 
 	// ── Check for wipe instruction BEFORE normal reconciliation ──
 	if payload.WipeInstruction != nil && payload.WipeInstruction.Action == "wipe_local_credentials" {
-		log.Printf("[sync] ⚠️  WIPE INSTRUCTION received from control plane (requested at: %s)", payload.WipeInstruction.RequestedAt)
+		audit.Warn("security.decommission", "WIPE INSTRUCTION received from control plane",
+			F("requested_at", payload.WipeInstruction.RequestedAt))
 		wipeAck := sm.executeLocalWipe()
 		sm.sendWipeAck(payload.Revision, wipeAck)
-		// After wipe, send the normal ack too
 		sm.sendAck(payload.Revision, "applied")
 		return
 	}
 
-	// ── Process pending relay commands (live API queries from users) ──
+	// ── Process pending relay commands ──
 	if len(payload.PendingCommands) > 0 {
-		log.Printf("[sync] Received %d pending relay command(s) — entering fast-poll mode", len(payload.PendingCommands))
-		// Enter fast-poll mode for 30 seconds to pick up follow-up commands quickly
+		audit.Info("sync.reconciled", "Received pending relay commands — entering fast-poll mode",
+			F("count", len(payload.PendingCommands)))
 		sm.fastPollUntil = time.Now().Add(30 * time.Second)
 		go sm.relayHandler.ProcessCommands(payload.PendingCommands)
 	}
 
-	// Validate all target profiles before applying any
+	// Validate all target profiles
 	validTargets, rejected := sm.validateProfiles(payload.Targets)
 	if len(rejected) > 0 {
-		log.Printf("[sync] Rejected %d invalid target profiles", len(rejected))
+		audit.Warn("sync.error", "Rejected invalid target profiles", F("count", len(rejected)))
 		for _, r := range rejected {
-			log.Printf("[sync]   ✗ %s (%s): %s", r.Name, r.TargetID, r.Reason)
+			audit.Warn("sync.error", "Profile rejected",
+				F("target_id", r.TargetID), F("name", r.Name), F("reason", r.Reason))
 		}
 	}
 
-	// Store rejected profiles so sendAck can include them in target_statuses
 	sm.lastRejected = rejected
 
-	// Apply host config overrides if provided
 	if payload.HostConfig != nil {
 		sm.applyHostConfig(payload.HostConfig)
 	}
-
-	// Apply policy if provided
 	if payload.Policy != nil {
 		sm.applyHostPolicy(payload.Policy)
 	}
 
-	// Process credential payloads for valid targets
+	// Process credential payloads
 	for i := range validTargets {
 		if validTargets[i].CredentialPayload != nil {
 			if err := sm.processCredentials(&validTargets[i]); err != nil {
-				log.Printf("[sync] Credential processing failed for %s: %v",
-					validTargets[i].Name, err)
-				// Don't fail the whole sync — this target just won't have updated creds
+				audit.Error("sync.error", "Credential processing failed",
+					F("target_name", validTargets[i].Name), Err(err))
 			}
 		}
 	}
 
-	// Convert desired profiles to internal TargetProfile and reconcile
 	ackStatus := sm.applyDesiredTargets(validTargets, payload.Revision)
-
-	// Send acknowledgement
 	sm.sendAck(payload.Revision, ackStatus)
 }
 
-// validateProfiles validates each profile and returns valid + rejected lists.
 func (sm *SyncManager) validateProfiles(profiles []DesiredTargetProfile) ([]DesiredTargetProfile, []RejectedProfile) {
 	var valid []DesiredTargetProfile
 	var rejected []RejectedProfile
@@ -424,14 +323,12 @@ func (sm *SyncManager) validateProfiles(profiles []DesiredTargetProfile) ([]Desi
 	return valid, rejected
 }
 
-// RejectedProfile records why a profile was rejected.
 type RejectedProfile struct {
 	TargetID string
 	Name     string
 	Reason   string
 }
 
-// processCredentials handles a credential payload for a target.
 func (sm *SyncManager) processCredentials(target *DesiredTargetProfile) error {
 	cp := target.CredentialPayload
 	if cp == nil {
@@ -440,17 +337,14 @@ func (sm *SyncManager) processCredentials(target *DesiredTargetProfile) error {
 
 	switch cp.EncryptionMethod {
 	case "host-keypair":
-		// Standard path: decrypt using host's NaCl private key
 		if sm.hostKeyPair == nil {
 			return fmt.Errorf("host keypair not available for decryption")
 		}
 
-		// Prefer versioned envelope if present
 		if cp.Envelope != nil {
 			return sm.processEnvelope(cp.Envelope, target.TargetID)
 		}
 
-		// Fall back to raw blob format
 		if cp.EncryptedBlob == "" {
 			return fmt.Errorf("empty encrypted blob and no envelope")
 		}
@@ -465,20 +359,21 @@ func (sm *SyncManager) processCredentials(target *DesiredTargetProfile) error {
 		return sm.store.SaveSecret(target.TargetID, creds)
 
 	case "token-scoped", "plaintext":
-		// DEPRECATED — migration path only for pre-Phase 4 hosts.
-		// Will be removed in a future version.
-		log.Printf("[sync] WARNING: Received deprecated token-scoped credentials for %s — migrate host to enable encrypted delivery", target.Name)
+		audit.Warn("sync.reconciled", "Received deprecated token-scoped credentials — migrate host to enable encrypted delivery",
+			F("target_name", target.Name))
 		if len(cp.Credentials) == 0 {
 			return fmt.Errorf("empty credential payload")
 		}
 		return sm.store.SaveSecret(target.TargetID, cp.Credentials)
 
 	case "unavailable":
-		log.Printf("[sync] WARNING: Backend withheld credentials for %s — host public key not registered", target.Name)
+		audit.Warn("sync.error", "Backend withheld credentials — host public key not registered",
+			F("target_name", target.Name))
 		return fmt.Errorf("credentials unavailable: %s", cp.EncryptionMethod)
 
 	case "error":
-		log.Printf("[sync] WARNING: Backend credential encryption error for %s", target.Name)
+		audit.Error("sync.error", "Backend credential encryption error",
+			F("target_name", target.Name))
 		return fmt.Errorf("backend credential encryption error")
 
 	default:
@@ -486,9 +381,7 @@ func (sm *SyncManager) processCredentials(target *DesiredTargetProfile) error {
 	}
 }
 
-// processEnvelope decrypts a versioned CredentialEnvelope.
 func (sm *SyncManager) processEnvelope(env *CredentialEnvelope, targetID string) error {
-	// Validate envelope format
 	if env.Format != "ecpv1" {
 		return fmt.Errorf("unsupported credential envelope format: %s", env.Format)
 	}
@@ -496,8 +389,6 @@ func (sm *SyncManager) processEnvelope(env *CredentialEnvelope, targetID string)
 		return fmt.Errorf("unsupported envelope algorithm: %s", env.Algorithm)
 	}
 
-	// Reconstruct the raw blob from envelope fields for DecryptCredentialPayload
-	// Blob format: senderPub(32) + nonce(24) + ciphertext
 	senderPub, err := base64Decode(env.SenderPublicKey)
 	if err != nil {
 		return fmt.Errorf("decode sender public key: %w", err)
@@ -518,7 +409,6 @@ func (sm *SyncManager) processEnvelope(env *CredentialEnvelope, targetID string)
 		return fmt.Errorf("invalid nonce length: %d", len(nonce))
 	}
 
-	// Reconstruct blob and decrypt
 	blob := make([]byte, 0, 32+24+len(ciphertext))
 	blob = append(blob, senderPub...)
 	blob = append(blob, nonce...)
@@ -535,33 +425,29 @@ func (sm *SyncManager) processEnvelope(env *CredentialEnvelope, targetID string)
 		return fmt.Errorf("unmarshal envelope credentials: %w", err)
 	}
 
-	log.Printf("[sync] ✓ Decrypted credentials via ecpv1 envelope for target %s", targetID)
+	audit.Info("security.creds_decrypted", "Decrypted credentials via ecpv1 envelope",
+		F("target_id", targetID))
 	return sm.store.SaveSecret(targetID, creds)
 }
 
-// base64Decode decodes a standard base64 string.
 func base64Decode(s string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(s)
 }
 
-// base64Encode encodes bytes to standard base64.
 func base64Encode(data []byte) string {
 	return base64.StdEncoding.EncodeToString(data)
 }
 
-// sendAck sends a revision acknowledgement to the backend.
 func (sm *SyncManager) sendAck(revision int64, status string) {
 	token := sm.supervisor.GetConnectorToken()
 	if token == "" {
 		return
 	}
 
-	// Build per-target status map from running targets
 	targetStatuses := make(map[string]TargetAckStatus)
 	for _, t := range sm.supervisor.GetTargets() {
 		ts := TargetAckStatus{Status: string(t.Status)}
 		if t.Status == TargetStatusError || t.Status == TargetStatusDegraded {
-			// Get worker state for error info
 			for _, ws := range sm.supervisor.Status() {
 				if ws.TargetID == t.TargetID && ws.LastError != "" {
 					ts.Error = ws.LastError
@@ -572,7 +458,6 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 		targetStatuses[t.TargetID] = ts
 	}
 
-	// Include rejected targets so the control plane knows they failed
 	for _, r := range sm.lastRejected {
 		targetStatuses[r.TargetID] = TargetAckStatus{
 			Status: "error",
@@ -580,7 +465,6 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 		}
 	}
 
-	// Downgrade overall status if any targets were rejected
 	if len(sm.lastRejected) > 0 && status == "applied" {
 		if len(sm.supervisor.GetTargets()) > 0 {
 			status = "partial"
@@ -598,7 +482,6 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 
 	sm.backend.SendAcknowledgement(token, ack)
 
-	// Update local tracking
 	if state := sm.supervisor.GetState(); state != nil {
 		state.LastSyncRevision = revision
 		state.LastSyncAt = time.Now()
@@ -607,46 +490,43 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 	}
 }
 
-// executeLocalWipe stops all workers, deletes per-target credentials and state.
-// Preserves host identity so the wipe acknowledgement can be sent.
 func (sm *SyncManager) executeLocalWipe() WipeAckPayload {
 	targets := sm.supervisor.GetTargets()
 	wipedCount := 0
 
-	log.Printf("[wipe] Stopping all workers...")
+	audit.Warn("security.decommission", "Stopping all workers for wipe")
 	sm.supervisor.Shutdown()
 
-	log.Printf("[wipe] Removing per-target credentials and state...")
+	audit.Warn("security.decommission", "Removing per-target credentials and state")
 	for _, t := range targets {
-		// Delete credentials
 		if err := sm.store.DeleteSecret(t.CredentialRef); err != nil {
-			log.Printf("[wipe] Failed to delete credentials for %s: %v", t.Name, err)
+			audit.Error("security.decommission", "Failed to delete credentials",
+				F("target_name", t.Name), Err(err))
 		} else {
-			log.Printf("[wipe] ✓ Deleted credentials for target: %s", t.Name)
+			audit.Info("security.decommission", "Deleted credentials for target",
+				F("target_name", t.Name))
 			wipedCount++
 		}
 	}
 
-	// Clear targets from state but keep host identity
 	state := sm.supervisor.GetState()
 	if state != nil {
 		state.Targets = []TargetProfile{}
 		if err := sm.store.SaveState(state); err != nil {
-			log.Printf("[wipe] Failed to save cleared state: %v", err)
+			audit.Error("security.decommission", "Failed to save cleared state", Err(err))
 			return WipeAckPayload{Status: "failed", Error: fmt.Sprintf("state save failed: %v", err), WipedTargets: wipedCount}
 		}
-		log.Printf("[wipe] ✓ Cleared target profiles from local state")
+		audit.Info("security.decommission", "Cleared target profiles from local state")
 	}
 
-	log.Printf("[wipe] ✓ Local wipe complete — %d target credentials removed", wipedCount)
+	audit.Info("security.decommission", "Local wipe complete", F("wiped_targets", wipedCount))
 	return WipeAckPayload{Status: "completed", WipedTargets: wipedCount}
 }
 
-// sendWipeAck sends a wipe acknowledgement to the backend.
 func (sm *SyncManager) sendWipeAck(revision int64, wipeResult WipeAckPayload) {
 	token := sm.supervisor.GetConnectorToken()
 	if token == "" {
-		log.Printf("[wipe] Cannot send wipe ack — no connector token")
+		audit.Warn("security.decommission", "Cannot send wipe ack — no connector token")
 		return
 	}
 
@@ -658,13 +538,12 @@ func (sm *SyncManager) sendWipeAck(revision int64, wipeResult WipeAckPayload) {
 	}
 
 	if err := sm.backend.SendAcknowledgement(token, ack); err != nil {
-		log.Printf("[wipe] Failed to send wipe ack: %v", err)
+		audit.Error("security.decommission", "Failed to send wipe ack", Err(err))
 	} else {
-		log.Printf("[wipe] ✓ Wipe acknowledgement sent to control plane")
+		audit.Info("security.decommission", "Wipe acknowledgement sent to control plane")
 	}
 }
 
-// applyHostConfig applies safe host-level config overrides.
 func (sm *SyncManager) applyHostConfig(override *HostConfigOverride) {
 	state := sm.supervisor.GetState()
 	if state == nil {
@@ -674,6 +553,7 @@ func (sm *SyncManager) applyHostConfig(override *HostConfigOverride) {
 	changed := false
 	if override.LogLevel != "" && isValidLogLevel(override.LogLevel) {
 		state.Config.LogLevel = override.LogLevel
+		audit.SetLevel(parseLogLevel(override.LogLevel))
 		changed = true
 	}
 	if override.SyncIntervalSecs > 0 && override.SyncIntervalSecs >= 15 {
@@ -686,11 +566,10 @@ func (sm *SyncManager) applyHostConfig(override *HostConfigOverride) {
 	}
 
 	if changed {
-		log.Printf("[sync] Applied host config overrides")
+		audit.Info("sync.reconciled", "Applied host config overrides")
 	}
 }
 
-// applyHostPolicy applies host-level policy settings.
 func (sm *SyncManager) applyHostPolicy(policy *HostPolicy) {
 	state := sm.supervisor.GetState()
 	if state == nil {
@@ -700,19 +579,15 @@ func (sm *SyncManager) applyHostPolicy(policy *HostPolicy) {
 	if policy.AutoUpdatePolicy != "" {
 		state.Config.AutoUpdatePolicy = policy.AutoUpdatePolicy
 	}
-	log.Printf("[sync] Applied host policy")
+	audit.Info("sync.reconciled", "Applied host policy")
 }
 
-// applyDesiredTargets converts desired profiles to internal profiles and updates supervisor.
-// Returns an ack status: "applied", "partial", or "failed".
 func (sm *SyncManager) applyDesiredTargets(desired []DesiredTargetProfile, revision int64) string {
-	// Build set of desired target IDs
 	desiredIDs := make(map[string]bool)
 	for _, d := range desired {
 		desiredIDs[d.TargetID] = true
 	}
 
-	// Get current targets
 	currentTargets := sm.supervisor.GetTargets()
 	currentMap := make(map[string]*TargetProfile)
 	for i := range currentTargets {
@@ -722,17 +597,17 @@ func (sm *SyncManager) applyDesiredTargets(desired []DesiredTargetProfile, revis
 	errors := 0
 	applied := 0
 
-	// Process each desired target
 	for _, d := range desired {
 		profile := desiredToInternal(d)
 
 		current, exists := currentMap[d.TargetID]
 		if !exists {
-			// New target — add it
-			log.Printf("[sync] Adding new target: %s (%s)", d.Name, d.TargetType)
+			audit.Info("target.added", "Adding new target",
+				Target(d.TargetID, d.TargetType, d.Name)...)
 			creds := extractCredsFromPayload(d.CredentialPayload)
 			if err := sm.supervisor.AddTarget(profile, creds); err != nil {
-				log.Printf("[sync] Failed to add target %s: %v", d.Name, err)
+				audit.Error("sync.error", "Failed to add target",
+					append(Target(d.TargetID, d.TargetType, d.Name), Err(err))...)
 				errors++
 			} else {
 				applied++
@@ -740,31 +615,34 @@ func (sm *SyncManager) applyDesiredTargets(desired []DesiredTargetProfile, revis
 			continue
 		}
 
-		// Existing target — check if update needed
 		if d.ConfigVersion > current.ConfigVersion || profileChanged(current, &profile) {
-			log.Printf("[sync] Updating target: %s (v%d → v%d)", d.Name,
-				current.ConfigVersion, d.ConfigVersion)
+			audit.Info("target.updated", "Updating target",
+				append(Target(d.TargetID, d.TargetType, d.Name),
+					F("old_version", current.ConfigVersion),
+					F("new_version", d.ConfigVersion))...)
 			sm.supervisor.UpdateTarget(profile)
 			applied++
 			continue
 		}
 
-		// Check enable/disable state change
 		if d.Enabled != current.Enabled || d.Paused != current.Paused {
-			log.Printf("[sync] State change for %s: enabled=%v paused=%v", d.Name, d.Enabled, d.Paused)
+			audit.Info("target.updated", "State change",
+				append(Target(d.TargetID, d.TargetType, d.Name),
+					F("enabled", d.Enabled), F("paused", d.Paused))...)
 			sm.supervisor.UpdateTarget(profile)
 			applied++
 		} else {
-			applied++ // no change needed = success
+			applied++
 		}
 	}
 
-	// Remove targets no longer in desired state
 	for id, current := range currentMap {
 		if !desiredIDs[id] {
-			log.Printf("[sync] Removing target no longer in desired state: %s", current.Name)
+			audit.Info("target.removed", "Removing target no longer in desired state",
+				Target(id, current.TargetType, current.Name)...)
 			if err := sm.supervisor.RemoveTarget(id); err != nil {
-				log.Printf("[sync] Failed to remove target %s: %v", current.Name, err)
+				audit.Error("sync.error", "Failed to remove target",
+					append(Target(id, current.TargetType, current.Name), Err(err))...)
 				errors++
 			} else {
 				applied++
@@ -772,7 +650,8 @@ func (sm *SyncManager) applyDesiredTargets(desired []DesiredTargetProfile, revis
 		}
 	}
 
-	log.Printf("[sync] Reconciliation complete (revision: %d, targets: %d, errors: %d)", revision, len(desired), errors)
+	audit.Info("sync.reconciled", "Reconciliation complete",
+		F("revision", revision), F("targets", len(desired)), F("errors", errors))
 
 	if errors > 0 && applied > 0 {
 		return "partial"
@@ -783,7 +662,6 @@ func (sm *SyncManager) applyDesiredTargets(desired []DesiredTargetProfile, revis
 	return "applied"
 }
 
-// desiredToInternal converts a DesiredTargetProfile to an internal TargetProfile.
 func desiredToInternal(d DesiredTargetProfile) TargetProfile {
 	return TargetProfile{
 		TargetID:               d.TargetID,
@@ -800,7 +678,7 @@ func desiredToInternal(d DesiredTargetProfile) TargetProfile {
 		ResourceLimits:         d.ResourceLimits,
 		Paused:                 d.Paused,
 		MaintenanceReason:      d.MaintenanceReason,
-		CredentialRef:          d.TargetID, // credential ref = target ID
+		CredentialRef:          d.TargetID,
 		CredentialRotationDays: d.CredentialRotationDays,
 		ConfigVersion:          d.ConfigVersion,
 		UpdatedAt:              time.Now(),
@@ -809,8 +687,6 @@ func desiredToInternal(d DesiredTargetProfile) TargetProfile {
 	}
 }
 
-// extractCredsFromPayload extracts credentials from a payload, returning
-// an empty map if the payload is nil or encrypted with unsupported method.
 func extractCredsFromPayload(cp *CredentialPayload) map[string]string {
 	if cp == nil {
 		return map[string]string{}
@@ -821,7 +697,6 @@ func extractCredsFromPayload(cp *CredentialPayload) map[string]string {
 	return map[string]string{}
 }
 
-// profileChanged checks if a profile needs updating (beyond config version).
 func profileChanged(current *TargetProfile, desired *TargetProfile) bool {
 	if current.Endpoint != desired.Endpoint {
 		return true
@@ -838,7 +713,6 @@ func profileChanged(current *TargetProfile, desired *TargetProfile) bool {
 	return false
 }
 
-// isValidLogLevel checks if a log level is recognized.
 func isValidLogLevel(level string) bool {
 	switch level {
 	case "debug", "info", "warn", "error":
@@ -847,9 +721,8 @@ func isValidLogLevel(level string) bool {
 	return false
 }
 
-// ── JSON helpers for backend response parsing ──
+// ── JSON helpers ──
 
-// parseDesiredState parses a JSON response into a DesiredStatePayload.
 func parseDesiredState(data []byte) (*DesiredStatePayload, error) {
 	var payload DesiredStatePayload
 	if err := json.Unmarshal(data, &payload); err != nil {

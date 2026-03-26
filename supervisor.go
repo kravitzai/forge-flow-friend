@@ -8,7 +8,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"time"
 )
@@ -58,19 +57,20 @@ func (s *Supervisor) Initialize(legacyCfg *Config) error {
 	// Try loading existing state
 	state, err := s.store.LoadState()
 	if err != nil {
-		log.Printf("[supervisor] Failed to load state, starting fresh: %v", err)
+		audit.Warn("host.config_loaded", "Failed to load state, starting fresh", Err(err))
 	}
 
 	if state != nil {
 		s.state = state
-		log.Printf("[supervisor] Loaded host state: %s (%d targets)",
-			state.Identity.Label, len(state.Targets))
+		audit.Info("host.config_loaded", "Loaded host state",
+			F("label", state.Identity.Label), F("targets", len(state.Targets)))
 		return nil
 	}
 
 	// No existing state — check for legacy env config
 	if legacyCfg != nil && legacyCfg.ConnectorToken != "" {
-		log.Printf("[supervisor] Migrating legacy %s config to host model", legacyCfg.TargetType)
+		audit.Info("host.config_loaded", "Migrating legacy config to host model",
+			F("target_type", legacyCfg.TargetType))
 		state, creds := ImportLegacyEnvConfig(legacyCfg)
 		s.state = state
 
@@ -87,8 +87,8 @@ func (s *Supervisor) Initialize(legacyCfg *Config) error {
 			return fmt.Errorf("save initial state: %w", err)
 		}
 
-		log.Printf("[supervisor] Migration complete: host=%s, targets=%d",
-			state.Identity.HostID[:12], len(state.Targets))
+		audit.Info("host.config_loaded", "Migration complete",
+			F("host_id_short", state.Identity.HostID[:12]), F("targets", len(state.Targets)))
 		return nil
 	}
 
@@ -123,8 +123,8 @@ func (s *Supervisor) Reconcile() error {
 		return fmt.Errorf("supervisor not initialized")
 	}
 
-	log.Printf("[supervisor] Reconciling %d target profiles against %d running workers",
-		len(s.state.Targets), len(s.workers))
+	audit.Info("sync.reconciled", "Reconciling targets",
+		F("desired", len(s.state.Targets)), F("running", len(s.workers)))
 
 	desiredIDs := map[string]bool{}
 
@@ -137,7 +137,8 @@ func (s *Supervisor) Reconcile() error {
 		// Case 1: Target disabled or revoked — stop worker if running
 		if !target.Enabled || target.Status == TargetStatusRevoked {
 			if hasWorker {
-				log.Printf("[reconcile] Stopping disabled/revoked target: %s", target.Name)
+				audit.Info("target.removed", "Stopping disabled/revoked target",
+					Target(target.TargetID, target.TargetType, target.Name)...)
 				existing.Stop()
 				delete(s.workers, target.TargetID)
 			}
@@ -149,7 +150,8 @@ func (s *Supervisor) Reconcile() error {
 			if hasWorker {
 				ws := existing.State()
 				if ws.Status == WorkerStatusRunning {
-					log.Printf("[reconcile] Pausing target: %s", target.Name)
+					audit.Info("worker.stopped", "Pausing target",
+						Target(target.TargetID, target.TargetType, target.Name)...)
 					existing.Pause()
 				}
 			}
@@ -163,7 +165,8 @@ func (s *Supervisor) Reconcile() error {
 
 		// Case 4: No worker — start one
 		if err := s.startWorkerLocked(target); err != nil {
-			log.Printf("[reconcile] Failed to start worker for %s: %v", target.Name, err)
+			audit.Error("worker.failed", "Failed to start worker",
+				append(Target(target.TargetID, target.TargetType, target.Name), Err(err))...)
 			target.Status = TargetStatusError
 		}
 	}
@@ -171,7 +174,7 @@ func (s *Supervisor) Reconcile() error {
 	// Case 5: Workers running for targets no longer in desired state — stop them
 	for targetID, worker := range s.workers {
 		if !desiredIDs[targetID] {
-			log.Printf("[reconcile] Stopping orphaned worker: %s", targetID)
+			audit.Info("target.removed", "Stopping orphaned worker", F("target_id", targetID))
 			worker.Stop()
 			delete(s.workers, targetID)
 		}
@@ -233,16 +236,14 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 	s.workers[target.TargetID] = worker
 	target.Status = TargetStatusActive
 
-	log.Printf("[supervisor] Started worker for %s (%s) — poll every %ds",
-		target.Name, target.TargetType, target.PollIntervalSecs)
+	audit.Info("worker.started", "Started worker",
+		append(Target(target.TargetID, target.TargetType, target.Name),
+			F("poll_interval_secs", target.PollIntervalSecs))...)
 
 	return nil
 }
 
 // onWorkerStateChange handles worker status transitions.
-// This may be called from worker goroutines OR from the supervisor's own
-// Reconcile path (via Stop/Pause). To avoid deadlock when the supervisor
-// lock is already held, we dispatch asynchronously.
 func (s *Supervisor) onWorkerStateChange(targetID string, status WorkerStatus) {
 	go func() {
 		s.mu.Lock()
@@ -293,6 +294,9 @@ func (s *Supervisor) AddTarget(profile TargetProfile, creds map[string]string) e
 	s.state.Targets = append(s.state.Targets, profile)
 	s.mu.Unlock()
 
+	audit.Info("target.added", "Target added",
+		Target(profile.TargetID, profile.TargetType, profile.Name)...)
+
 	// Reconcile will start the worker
 	return s.Reconcile()
 }
@@ -328,6 +332,9 @@ func (s *Supervisor) UpdateTarget(profile TargetProfile) error {
 		return fmt.Errorf("target %s not found for update", profile.TargetID)
 	}
 
+	audit.Info("target.updated", "Target updated",
+		Target(profile.TargetID, profile.TargetType, profile.Name)...)
+
 	return s.Reconcile()
 }
 
@@ -344,9 +351,11 @@ func (s *Supervisor) RemoveTarget(targetID string) error {
 	// Remove from state
 	found := false
 	var credRef string
+	var targetName string
 	for i, t := range s.state.Targets {
 		if t.TargetID == targetID {
 			credRef = t.CredentialRef
+			targetName = t.Name
 			s.state.Targets = append(s.state.Targets[:i], s.state.Targets[i+1:]...)
 			found = true
 			break
@@ -358,6 +367,9 @@ func (s *Supervisor) RemoveTarget(targetID string) error {
 	if !found {
 		return fmt.Errorf("target %s not found", targetID)
 	}
+
+	audit.Info("target.removed", "Target removed",
+		F("target_id", targetID), F("target_name", targetName))
 
 	// Clean up credentials
 	if credRef != "" {
@@ -432,14 +444,13 @@ func (s *Supervisor) Shutdown() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	log.Printf("[supervisor] Shutting down %d workers...", len(s.workers))
+	audit.Info("host.shutdown", "Shutting down workers", F("count", len(s.workers)))
 	var wg sync.WaitGroup
 	for id, w := range s.workers {
 		wg.Add(1)
 		go func(id string, w *Worker) {
 			defer wg.Done()
 			w.Stop()
-			log.Printf("[supervisor] Worker %s stopped", id)
 		}(id, w)
 	}
 	wg.Wait()
@@ -450,7 +461,7 @@ func (s *Supervisor) Shutdown() {
 		s.store.SaveState(s.state)
 	}
 
-	log.Printf("[supervisor] All workers stopped")
+	audit.Info("host.shutdown", "All workers stopped")
 }
 
 // TargetCount returns the number of configured targets.
@@ -496,7 +507,6 @@ func (s *Supervisor) BuildCapabilityManifest() HostCapabilityManifest {
 
 	adapters := make([]AdapterCapabilityInfo, 0, len(s.adapters))
 	for targetType, factory := range s.adapters {
-		// Create a temporary adapter to get capabilities
 		dummyProfile := &TargetProfile{TargetType: targetType, Name: "probe"}
 		adapter, err := factory(dummyProfile)
 		var caps []string
@@ -507,7 +517,7 @@ func (s *Supervisor) BuildCapabilityManifest() HostCapabilityManifest {
 		adapters = append(adapters, AdapterCapabilityInfo{
 			TargetType:   targetType,
 			Capabilities: caps,
-			OpsSupported: false, // Phase 6: all adapters are read-only
+			OpsSupported: false,
 		})
 	}
 

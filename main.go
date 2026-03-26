@@ -39,7 +39,15 @@ func main() {
 	}
 
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
-	log.Printf("[host] ForgeAI Connector Host v%s starting", HostVersion)
+
+	// Initialize audit logger early — use env LOG_LEVEL or default "info"
+	configLevel := os.Getenv("LOG_LEVEL")
+	if configLevel == "" {
+		configLevel = "info"
+	}
+	InitAuditLogger(configLevel)
+
+	audit.Info("host.startup", fmt.Sprintf("ForgeAI Connector Host v%s starting", HostVersion))
 
 	// ── Read remote action opt-in flags from environment ──
 	remoteLiveQuery := envBool("FORGEAI_REMOTE_LIVE_QUERY")
@@ -64,16 +72,16 @@ func main() {
 	}
 
 	if forceReset {
-		log.Printf("[host] ⚠️  --force-reset-state: Clearing persisted enrollment state...")
+		audit.Warn("host.config_loaded", "Force-reset: Clearing persisted enrollment state")
 		resetFiles := []string{
 			filepath.Join(configDir, stateFileName),
 			filepath.Join(configDir, keyFileName),
 		}
 		for _, f := range resetFiles {
 			if err := os.Remove(f); err != nil && !os.IsNotExist(err) {
-				log.Printf("[host]   Failed to remove %s: %v", f, err)
+				audit.Error("host.config_loaded", "Failed to remove file", F("path", f), Err(err))
 			} else if err == nil {
-				log.Printf("[host]   Removed: %s", f)
+				audit.Info("host.config_loaded", "Removed file", F("path", f))
 			}
 		}
 		// Remove all secret files
@@ -82,16 +90,17 @@ func main() {
 		for _, e := range entries {
 			p := filepath.Join(secretsDir, e.Name())
 			if err := os.Remove(p); err == nil {
-				log.Printf("[host]   Removed: %s", p)
+				audit.Info("host.config_loaded", "Removed secret file", F("path", p))
 			}
 		}
-		log.Printf("[host] State reset complete. Host will re-enroll on this run.")
+		audit.Info("host.config_loaded", "State reset complete — host will re-enroll on this run")
 	}
 
 	// Initialize encrypted store
 	store, err := NewStore(configDir)
 	if err != nil {
-		log.Fatalf("[store] Initialization failed: %v", err)
+		audit.Critical("host.startup", "Store initialization failed", Err(err))
+		os.Exit(1)
 	}
 
 	// Determine backend URL
@@ -128,12 +137,6 @@ func main() {
 	supervisor.RegisterAdapter("dell-idrac", NewIdracAdapter)
 
 	// ── Enrollment / State Loading ──
-	// Priority:
-	//   1. Existing enrolled state (host.json.enc)
-	//   2. Enrollment via FORGEAI_ENROLLMENT_TOKEN
-	//   3. Legacy env-var migration (CONNECTOR_TOKEN + TARGET_TYPE)
-	//   4. Bare enrollment via CONNECTOR_TOKEN (no target type = enroll-only)
-
 	enrollmentToken := os.Getenv("FORGEAI_ENROLLMENT_TOKEN")
 	legacyCfg := detectLegacyEnvConfig()
 
@@ -141,18 +144,26 @@ func main() {
 		// Enrollment flow
 		state, err := MustEnroll(store, backendURL)
 		if err != nil {
-			log.Fatalf("[enrollment] %v", err)
+			audit.Critical("enrollment.failed", "Enrollment failed", Err(err))
+			os.Exit(1)
 		}
 		supervisor.InitializeWithState(state)
-		log.Printf("[host] Enrolled host: %s (%s)", state.Identity.Label, state.Identity.HostID[:12])
+		audit.SetHostID(state.Identity.HostID)
+		audit.Info("enrollment.success", "Host enrolled",
+			F("label", state.Identity.Label), F("host_id_short", state.Identity.HostID[:12]))
 	} else {
 		// Legacy / existing state flow
 		if err := supervisor.Initialize(legacyCfg); err != nil {
-			log.Fatalf("[supervisor] Initialization failed: %v", err)
+			audit.Critical("host.startup", "Supervisor initialization failed", Err(err))
+			os.Exit(1)
+		}
+		// Set host ID if state was loaded
+		if state := supervisor.GetState(); state != nil && state.Identity.HostID != "" {
+			audit.SetHostID(state.Identity.HostID)
 		}
 	}
 
-	log.Printf("[host] Configured targets: %d", supervisor.TargetCount())
+	audit.Info("host.config_loaded", "Targets configured", F("count", supervisor.TargetCount()))
 
 	// Apply remote action flags to host config
 	if state := supervisor.GetState(); state != nil {
@@ -163,10 +174,15 @@ func main() {
 			state.Config.RemoteRestartEnabled = true
 		}
 		if remoteLiveQuery || remoteRestart {
-			log.Printf("[host] Remote actions: live_query=%v restart=%v", state.Config.RemoteLiveQueryEnabled, state.Config.RemoteRestartEnabled)
+			audit.Info("host.config_loaded", "Remote actions configured",
+				F("live_query", state.Config.RemoteLiveQueryEnabled),
+				F("restart", state.Config.RemoteRestartEnabled))
 		} else {
-			log.Printf("[host] Remote actions: disabled (set FORGEAI_REMOTE_LIVE_QUERY=true and/or FORGEAI_REMOTE_RESTART=true to enable)")
+			audit.Info("host.config_loaded", "Remote actions disabled (set FORGEAI_REMOTE_LIVE_QUERY=true and/or FORGEAI_REMOTE_RESTART=true to enable)")
 		}
+
+		// Update audit logger level from persisted config
+		audit.SetLevel(parseLogLevel(state.Config.LogLevel))
 	}
 
 	// ── Upload Queue ──
@@ -180,10 +196,12 @@ func main() {
 
 	// Reconcile — starts workers for all enabled targets
 	if err := supervisor.Reconcile(); err != nil {
-		log.Fatalf("[supervisor] Reconciliation failed: %v", err)
+		audit.Critical("host.startup", "Reconciliation failed", Err(err))
+		os.Exit(1)
 	}
 
-	log.Printf("[host] Active workers: %d", supervisor.WorkerCount())
+	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
+
 	// Set up signal channel early for use by update goroutine
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
@@ -198,25 +216,25 @@ func main() {
 
 		syncManager = NewSyncManager(backend, store, supervisor)
 		syncManager.Start(syncInterval)
-		log.Printf("[host] Desired-state sync enabled (interval: %v)", syncInterval)
+		audit.Info("sync.reconciled", "Desired-state sync enabled", F("interval", syncInterval.String()))
 	} else {
-		log.Printf("[host] No connector token — desired-state sync disabled")
-		log.Printf("[host] Enroll the host to enable remote management")
+		audit.Warn("sync.error", "No connector token — desired-state sync disabled")
+		audit.Info("host.config_loaded", "Enroll the host to enable remote management")
 	}
 
 	// ── Update Manager ──
 	var updateManager *UpdateManager
 	updateMgr, err := NewUpdateManager(store, backend, supervisor, configDir)
 	if err != nil {
-		log.Printf("[host] WARNING: Update manager init failed: %v", err)
+		audit.Warn("update.check", "Update manager init failed", Err(err))
 	} else {
 		updateManager = updateMgr
 
 		// Check for pending rollback from a previous failed update
 		if updateManager.CheckRollbackNeeded() {
-			log.Printf("[host] Pending rollback detected — initiating automatic rollback")
+			audit.Warn("update.rollback", "Pending rollback detected — initiating automatic rollback")
 			if err := updateManager.Rollback(); err != nil {
-				log.Printf("[host] WARNING: Rollback failed: %v", err)
+				audit.Error("update.rollback", "Rollback failed", Err(err))
 			}
 		} else {
 			// Confirm health if this is a new version that just started
@@ -243,28 +261,29 @@ func main() {
 					case <-ticker.C:
 						manifest, err := updateManager.CheckForUpdate(updatePolicy)
 						if err != nil {
-							log.Printf("[updater] Update check error: %v", err)
+							audit.Error("update.check", "Update check error", Err(err))
 							continue
 						}
 						if manifest != nil {
-							log.Printf("[updater] Update available: %s (channel: %s)", manifest.Version, manifest.Channel)
+							audit.Info("update.available", "Update available",
+								F("version", manifest.Version), F("channel", manifest.Channel))
 							if err := updateManager.StageUpdate(manifest); err != nil {
-								log.Printf("[updater] Stage failed: %v", err)
+								audit.Error("update.staged", "Stage failed", Err(err))
 							}
 						}
 					}
 				}
 			}()
-			log.Printf("[host] Update checks enabled (policy: %s)", updatePolicy)
+			audit.Info("update.check", "Update checks enabled", F("policy", string(updatePolicy)))
 		} else {
-			log.Printf("[host] Auto-updates disabled (policy: none)")
+			audit.Info("update.check", "Auto-updates disabled (policy: none)")
 		}
 	}
 
 	// Wait for shutdown signal
 	sig := <-sigCh
 
-	log.Printf("[host] Received %v, shutting down gracefully...", sig)
+	audit.Info("host.shutdown", fmt.Sprintf("Received %v, shutting down gracefully...", sig))
 
 	// Stop metrics logger
 	close(metricsStopCh)
@@ -284,7 +303,7 @@ func main() {
 	// Stop upload queue after workers are done
 	uploadQueue.Stop()
 
-	log.Printf("[host] Shutdown complete")
+	audit.Info("host.shutdown", "Shutdown complete")
 }
 
 // detectLegacyEnvConfig checks for the old single-target environment
@@ -301,7 +320,7 @@ func detectLegacyEnvConfig() *Config {
 	}
 
 	if !strings.HasPrefix(token, "fgc_") {
-		log.Printf("[config] WARNING: CONNECTOR_TOKEN does not start with fgc_")
+		audit.Warn("host.config_loaded", "CONNECTOR_TOKEN does not start with fgc_")
 	}
 
 	targetType := strings.ToLower(os.Getenv("TARGET_TYPE"))
@@ -343,35 +362,35 @@ func detectLegacyEnvConfig() *Config {
 	switch targetType {
 	case "proxmox":
 		if c.ProxmoxBaseURL == "" {
-			log.Printf("[config] WARNING: PROXMOX_BASE_URL not set for proxmox target")
+			audit.Warn("host.config_loaded", "PROXMOX_BASE_URL not set for proxmox target")
 			return nil
 		}
 	case "truenas":
 		if c.TrueNASURL == "" || c.TrueNASAPIKey == "" {
-			log.Printf("[config] WARNING: TRUENAS_URL or TRUENAS_API_KEY not set")
+			audit.Warn("host.config_loaded", "TRUENAS_URL or TRUENAS_API_KEY not set")
 			return nil
 		}
 	default:
 		if !IsValidTargetType(targetType) {
-			log.Printf("[config] WARNING: Unsupported TARGET_TYPE: %s", targetType)
+			audit.Warn("host.config_loaded", "Unsupported TARGET_TYPE", F("target_type", targetType))
 			return nil
 		}
 	}
 
-	log.Printf("[config] Legacy env config detected: target_type=%s", targetType)
+	audit.Info("host.config_loaded", "Legacy env config detected", F("target_type", targetType))
 
 	switch targetType {
 	case "proxmox":
-		log.Printf("[config] Proxmox URL: %s", c.ProxmoxBaseURL)
+		audit.Info("host.config_loaded", "Proxmox endpoint", F("url", c.ProxmoxBaseURL))
 		if c.ProxmoxNode != "" {
-			log.Printf("[config] Limiting to node: %s", c.ProxmoxNode)
+			audit.Info("host.config_loaded", "Limiting to node", F("node", c.ProxmoxNode))
 		}
 	case "truenas":
-		log.Printf("[config] TrueNAS URL: %s", c.TrueNASURL)
+		audit.Info("host.config_loaded", "TrueNAS endpoint", F("url", c.TrueNASURL))
 	}
 
 	if c.InsecureSkipVerify {
-		log.Printf("[config] TLS verification DISABLED (self-signed)")
+		audit.Warn("host.config_loaded", "TLS verification DISABLED (self-signed)")
 	}
 
 	return c

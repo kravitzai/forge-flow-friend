@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"runtime"
@@ -29,13 +28,13 @@ type EnrollmentRequest struct {
 	Arch           string            `json:"arch"`
 	Capabilities   []string          `json:"capabilities,omitempty"`
 	Metadata       map[string]string `json:"metadata,omitempty"`
-	HostPublicKey  string            `json:"host_public_key,omitempty"` // base64 NaCl public key
+	HostPublicKey  string            `json:"host_public_key,omitempty"`
 }
 
 // EnrollmentResponse is returned from backend → host on successful enrollment.
 type EnrollmentResponse struct {
 	HostID         string `json:"host_id"`
-	ConnectorToken string `json:"connector_token"` // fgc_... long-lived token
+	ConnectorToken string `json:"connector_token"`
 	Label          string `json:"label"`
 	BackendURL     string `json:"backend_url"`
 	SyncIntervalS  int    `json:"sync_interval_secs,omitempty"`
@@ -44,10 +43,6 @@ type EnrollmentResponse struct {
 // ── Enrollment logic ──
 
 // EnrollHost performs first-time host enrollment with the ForgeAI backend.
-// It exchanges a bootstrap token for a persistent identity.
-//
-// The bootstrap token is single-use and provided by the operator from the
-// ForgeAI dashboard. It is never stored after enrollment completes.
 func EnrollHost(store *Store, backendURL, bootstrapToken, label string) (*HostState, error) {
 	// Guard: don't re-enroll if state already exists
 	existing, err := store.LoadState()
@@ -65,7 +60,7 @@ func EnrollHost(store *Store, backendURL, bootstrapToken, label string) (*HostSt
 	}
 
 	// Generate host keypair for asymmetric credential delivery
-	log.Printf("[enroll] Generating host keypair for secure credential delivery...")
+	audit.Info("enrollment.started", "Generating host keypair for secure credential delivery")
 	keyPair, err := GenerateHostKeyPair()
 	if err != nil {
 		return nil, fmt.Errorf("generate host keypair: %w", err)
@@ -88,7 +83,7 @@ func EnrollHost(store *Store, backendURL, bootstrapToken, label string) (*HostSt
 		return nil, fmt.Errorf("marshal enrollment request: %w", err)
 	}
 
-	log.Printf("[enroll] Enrolling host with backend at %s...", enrollURL)
+	audit.Info("enrollment.started", "Enrolling host with backend", F("url", enrollURL))
 
 	httpReq, err := http.NewRequest("POST", enrollURL, bytes.NewReader(body))
 	if err != nil {
@@ -131,7 +126,7 @@ func EnrollHost(store *Store, backendURL, bootstrapToken, label string) (*HostSt
 	if err := store.SaveKeyPair(keyPair); err != nil {
 		return nil, fmt.Errorf("persist host keypair: %w", err)
 	}
-	log.Printf("[enroll] Host keypair persisted (public key registered with backend)")
+	audit.Info("security.key_generated", "Host keypair persisted (public key registered with backend)")
 
 	// Build initial host state
 	state := &HostState{
@@ -157,7 +152,10 @@ func EnrollHost(store *Store, backendURL, bootstrapToken, label string) (*HostSt
 		return nil, fmt.Errorf("persist enrollment state: %w", err)
 	}
 
-	log.Printf("[enroll] ✓ Host enrolled: id=%s label=%s (keypair: yes)", enrollResp.HostID[:12], enrollResp.Label)
+	audit.Info("enrollment.success", "Host enrolled",
+		F("host_id_short", enrollResp.HostID[:12]),
+		F("label", enrollResp.Label),
+		F("keypair", true))
 
 	return state, nil
 }
@@ -177,27 +175,17 @@ func MustEnroll(store *Store, backendURL string) (*HostState, error) {
 	// Already enrolled? Just load state.
 	state, err := store.LoadState()
 	if err == nil && state != nil && state.Identity.ConnectorToken != "" {
-		log.Printf("[enroll] ── Existing enrollment detected ──")
-		log.Printf("[enroll]   Host ID:    %s", state.Identity.HostID[:12])
-		log.Printf("[enroll]   Label:      %s", state.Identity.Label)
+		audit.Info("enrollment.success", "Existing enrollment detected",
+			F("host_id_short", state.Identity.HostID[:12]),
+			F("label", state.Identity.Label))
 		if !state.Identity.EnrolledAt.IsZero() {
-			log.Printf("[enroll]   Enrolled:   %s", state.Identity.EnrolledAt.Format(time.RFC3339))
+			audit.Info("enrollment.success", "Enrolled at",
+				F("enrolled_at", state.Identity.EnrolledAt.Format(time.RFC3339)))
 		}
-		log.Printf("[enroll]   Token:      %s...", state.Identity.ConnectorToken[:8])
-		log.Printf("[enroll] Reusing existing host identity and connector token.")
-		log.Printf("[enroll] The FORGEAI_ENROLLMENT_TOKEN environment variable will NOT be used.")
-		log.Printf("[enroll] If the stored token is invalid or revoked, desired-state sync will fail.")
-		log.Printf("[enroll] To force a clean re-enrollment, see --force-reset-state or manual reset steps below.")
-		log.Printf("[enroll] ── Reset instructions ──")
-		log.Printf("[enroll]   Docker named volume:")
-		log.Printf("[enroll]     docker stop forgeai-host && docker rm forgeai-host")
-		log.Printf("[enroll]     docker volume rm forgeai-config")
-		log.Printf("[enroll]     docker run ... -e FORGEAI_ENROLLMENT_TOKEN='fgbt_...' ...")
-		log.Printf("[enroll]   Bind mount / systemd:")
-		log.Printf("[enroll]     sudo systemctl stop forgeai-host")
-		log.Printf("[enroll]     sudo rm -rf /etc/forgeai/host.json.enc /etc/forgeai/host.key /etc/forgeai/secrets/")
-		log.Printf("[enroll]     sudo systemctl start forgeai-host")
-		log.Printf("[enroll] ────────────────────────")
+		audit.Info("enrollment.success", "Reusing existing host identity and connector token")
+		audit.Info("enrollment.success", "The FORGEAI_ENROLLMENT_TOKEN environment variable will NOT be used")
+		audit.Warn("enrollment.success", "If the stored token is invalid or revoked, desired-state sync will fail")
+		audit.Info("enrollment.success", "To force a clean re-enrollment, see --force-reset-state or manual reset steps")
 		return state, nil
 	}
 

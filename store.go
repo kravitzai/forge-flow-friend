@@ -73,8 +73,7 @@ func NewStore(configDir string) (*Store, error) {
 	return s, nil
 }
 
-// checkWritable verifies the config directory is writable by creating
-// and immediately removing a temporary probe file.
+// checkWritable verifies the config directory is writable.
 func (s *Store) checkWritable() error {
 	probe := filepath.Join(s.configDir, ".write-probe")
 	f, err := os.Create(probe)
@@ -87,42 +86,40 @@ func (s *Store) checkWritable() error {
 }
 
 // logMountDiagnostics prints actionable debugging information when a
-// directory permission error occurs. It reports the current UID/GID,
-// the failing path, and whether the path looks like a bind mount or
-// named Docker volume.
+// directory permission error occurs. Uses audit logger if available,
+// falls back to log.Printf during early init.
 func (s *Store) logMountDiagnostics(failPath string) {
 	uid := os.Getuid()
 	gid := os.Getgid()
-	log.Printf("[store] ── Permission diagnostics ──")
-	log.Printf("[store]   Process UID: %d  GID: %d", uid, gid)
-	log.Printf("[store]   Path tested: %s", failPath)
-
 	mountType := detectMountType(failPath)
-	log.Printf("[store]   Mount type:  %s", mountType)
 
-	log.Printf("[store] ── Suggested fixes ──")
-	if mountType == "bind mount" {
-		log.Printf("[store]   Fix host ownership:")
-		log.Printf("[store]     sudo chown -R %d:%d %s", uid, gid, s.configDir)
-		log.Printf("[store]     sudo chmod 700 %s %s/secrets", s.configDir, s.configDir)
-		log.Printf("[store]   Or switch to a named volume:")
-		log.Printf("[store]     docker run ... -v forgeai-config:/etc/forgeai ...")
+	// During early init, audit may not be initialized yet
+	if audit != nil {
+		audit.Error("security.key_generated", "Permission diagnostics",
+			F("uid", uid), F("gid", gid), F("path", failPath), F("mount_type", mountType))
+		if mountType == "bind mount" {
+			audit.Error("security.key_generated", "Fix: chown or switch to named volume",
+				F("suggested_cmd", fmt.Sprintf("sudo chown -R %d:%d %s", uid, gid, s.configDir)))
+		} else {
+			audit.Error("security.key_generated", "Fix: recreate named volume",
+				F("suggested_cmd", "docker volume rm forgeai-config && docker compose up -d"))
+		}
 	} else {
-		log.Printf("[store]   Recreate the named volume:")
-		log.Printf("[store]     docker volume rm forgeai-config && docker compose up -d")
+		log.Printf("[store] ── Permission diagnostics ──")
+		log.Printf("[store]   Process UID: %d  GID: %d", uid, gid)
+		log.Printf("[store]   Path tested: %s", failPath)
+		log.Printf("[store]   Mount type:  %s", mountType)
 	}
 }
 
 // detectMountType inspects /proc/mounts to determine whether the given
-// path is backed by a bind mount (host filesystem) or a named Docker volume.
-// Falls back to "unknown" outside Linux or when /proc/mounts is unavailable.
+// path is backed by a bind mount or a named Docker volume.
 func detectMountType(path string) string {
 	data, err := os.ReadFile("/proc/mounts")
 	if err != nil {
 		return "unknown (cannot read /proc/mounts)"
 	}
 
-	// Find the longest-prefix mount point that matches path
 	bestMount := ""
 	bestFsType := ""
 	for _, line := range strings.Split(string(data), "\n") {
@@ -142,12 +139,10 @@ func detectMountType(path string) string {
 		return "unknown"
 	}
 
-	// overlay = Docker named volume; ext4/xfs/btrfs with exact match = bind mount
 	switch {
 	case bestFsType == "overlay":
 		return "named volume (overlay)"
 	case bestMount == path || strings.HasPrefix(path, bestMount+"/"):
-		// If the mount point IS the config dir (or its parent), likely a bind mount
 		if bestFsType == "ext4" || bestFsType == "xfs" || bestFsType == "btrfs" || bestFsType == "zfs" {
 			return "bind mount (" + bestFsType + ")"
 		}
@@ -163,7 +158,6 @@ func (s *Store) loadOrCreateKey() error {
 
 	data, err := os.ReadFile(keyPath)
 	if err == nil && len(data) >= keySize {
-		// Derive key from stored material
 		s.key = deriveKey(data)
 		return nil
 	}
@@ -179,6 +173,12 @@ func (s *Store) loadOrCreateKey() error {
 	}
 
 	s.key = deriveKey(material)
+
+	// Log key generation — audit may not be initialized yet
+	if audit != nil {
+		audit.Info("security.key_generated", "Encryption key created")
+	}
+
 	return nil
 }
 
@@ -191,7 +191,6 @@ func deriveKey(material []byte) []byte {
 // ── Host State ──
 
 // LoadState reads and decrypts the host state.
-// Returns nil (not an error) if no state file exists yet.
 func (s *Store) LoadState() (*HostState, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -199,7 +198,7 @@ func (s *Store) LoadState() (*HostState, error) {
 	path := filepath.Join(s.configDir, stateFileName)
 	ciphertext, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil, nil // fresh install
+		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read state: %w", err)
@@ -236,7 +235,6 @@ func (s *Store) SaveState(state *HostState) error {
 	path := filepath.Join(s.configDir, stateFileName)
 	tmpPath := path + ".tmp"
 
-	// Atomic write: write to temp, then rename
 	if err := os.WriteFile(tmpPath, ciphertext, 0600); err != nil {
 		return fmt.Errorf("write state: %w", err)
 	}
@@ -267,6 +265,10 @@ func (s *Store) LoadSecret(targetID string) (map[string]string, error) {
 	plaintext, err := s.decrypt(ciphertext)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt secret %s: %w", targetID, err)
+	}
+
+	if audit != nil {
+		audit.Debug("security.creds_decrypted", "Credentials decrypted", F("target_id", targetID))
 	}
 
 	var creds map[string]string
@@ -362,8 +364,7 @@ func (s *Store) decrypt(ciphertext []byte) ([]byte, error) {
 // ── Migration: import from legacy env-based config ──
 
 // ImportLegacyEnvConfig creates a HostState from the old single-target
-// environment variable configuration. This enables backward compatibility
-// during the transition to the multi-target model.
+// environment variable configuration.
 func ImportLegacyEnvConfig(cfg *Config) (*HostState, map[string]string) {
 	state := &HostState{
 		Identity: HostIdentity{
@@ -379,7 +380,6 @@ func ImportLegacyEnvConfig(cfg *Config) (*HostState, map[string]string) {
 
 	state.Config.InsecureSkipVerify = cfg.InsecureSkipVerify
 
-	// Build the target profile from legacy config
 	profile := TargetProfile{
 		TargetID:         generateID(),
 		Name:             fmt.Sprintf("Legacy %s target", cfg.TargetType),
@@ -390,7 +390,7 @@ func ImportLegacyEnvConfig(cfg *Config) (*HostState, map[string]string) {
 		PollIntervalSecs: cfg.PollIntervalSecs,
 		ConfigVersion:    1,
 		TargetConfig:     map[string]interface{}{},
-		CredentialRef:     "", // will be set after secret storage
+		CredentialRef:     "",
 	}
 
 	creds := map[string]string{}

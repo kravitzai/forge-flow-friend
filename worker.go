@@ -10,7 +10,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"sync"
 	"time"
@@ -71,17 +70,18 @@ func NewWorker(cfg WorkerConfig) *Worker {
 	}
 }
 
+// targetFields returns audit fields for this worker's target.
+func (w *Worker) targetFields() []Field {
+	return Target(w.profile.TargetID, w.profile.TargetType, w.profile.Name)
+}
+
 // Start begins the worker's collection loop.
-// NOTE: Start must NOT call notifyStateChange synchronously — the caller
-// (supervisor.startWorkerLocked) holds a mutex that the callback re-enters.
-// The Running transition is emitted from the run() goroutine after init.
 func (w *Worker) Start() error {
 	w.mu.Lock()
 	if w.state.Status == WorkerStatusRunning {
 		w.mu.Unlock()
 		return fmt.Errorf("worker %s already running", w.profile.TargetID)
 	}
-	// Mark as starting (not yet Running — that happens after init succeeds)
 	w.state.Status = WorkerStatusStarting
 	w.state.StartedAt = time.Now()
 	w.state.ConsecutiveErrors = 0
@@ -99,6 +99,7 @@ func (w *Worker) Stop() {
 		w.adapter.Close()
 	}
 	w.setStatus(WorkerStatusStopped)
+	audit.Info("worker.stopped", "Worker stopped", w.targetFields()...)
 }
 
 // Pause marks the worker as paused (stops collection but keeps adapter alive).
@@ -126,22 +127,21 @@ func (w *Worker) State() WorkerState {
 	return w.state
 }
 
-// run is the main collection loop. It initializes the adapter first,
-// and only transitions to Running after init succeeds.
+// run is the main collection loop.
 func (w *Worker) run() {
 	defer close(w.done)
 
-	// Initialize adapter inside the goroutine so the supervisor lock is
-	// not held during this call (and its state-change callback).
+	// Initialize adapter
 	if err := w.adapter.Init(w.profile, w.creds); err != nil {
-		log.Printf("[worker:%s] Adapter init failed: %v", w.profile.Name, err)
+		audit.Error("adapter.init_failed", "Adapter init failed",
+			append(w.targetFields(), Err(err))...)
 		w.setStatus(WorkerStatusFailed)
 		return
 	}
 
-	// Adapter initialized — now we are truly Running.
+	audit.Info("adapter.init", "Adapter initialized", w.targetFields()...)
 	w.setStatus(WorkerStatusRunning)
-	log.Printf("[worker:%s] Worker running", w.profile.Name)
+	audit.Info("worker.started", "Worker running", w.targetFields()...)
 
 	interval := time.Duration(w.profile.PollIntervalSecs) * time.Second
 	if interval < 10*time.Second {
@@ -182,6 +182,11 @@ func (w *Worker) collect() {
 			w.profile.TargetID, w.profile.TargetType, w.profile.Name,
 			collectDuration, 0, "error", nil,
 		)
+		audit.Error("collection.error", "Collection failed",
+			append(w.targetFields(),
+				Err(err),
+				F("duration_ms", collectDuration.Milliseconds()),
+			)...)
 		w.handleError(err)
 		w.sendHeartbeat()
 		return
@@ -227,9 +232,23 @@ func (w *Worker) collect() {
 		w.state.Status = WorkerStatusRunning
 		w.mu.Unlock()
 		w.notifyStateChange(WorkerStatusRunning)
-		log.Printf("[worker:%s] Recovered from degraded state", w.profile.Name)
+		audit.Info("worker.recovered", "Recovered from degraded state", w.targetFields()...)
 	} else {
 		w.mu.Unlock()
+	}
+
+	if collectionStatus == "partial" {
+		audit.Warn("collection.partial", "Partial collection",
+			append(w.targetFields(),
+				F("duration_ms", collectDuration.Milliseconds()),
+				F("payload_bytes", payloadBytes),
+			)...)
+	} else {
+		audit.Info("collection.success", "Snapshot collected",
+			append(w.targetFields(),
+				F("duration_ms", collectDuration.Milliseconds()),
+				F("payload_bytes", payloadBytes),
+			)...)
 	}
 
 	// Enrich payload with common fields
@@ -243,15 +262,19 @@ func (w *Worker) collect() {
 	if w.uploadQueue != nil {
 		priority := ClassifySnapshotPriority(payload)
 		if !w.uploadQueue.Enqueue(w.hostToken, payload, priority) {
-			log.Printf("[worker:%s] Snapshot dropped by upload queue", w.profile.Name)
+			audit.Error("upload.dropped", "Snapshot dropped by upload queue", w.targetFields()...)
 		}
 	} else {
 		// Inline fallback (legacy)
 		if err := w.backend.Post(w.hostToken, payload); err != nil {
-			log.Printf("[worker:%s] Snapshot delivery failed: %v", w.profile.Name, err)
+			audit.Warn("upload.failed", "Snapshot delivery failed",
+				append(w.targetFields(), Err(err))...)
 		} else {
-			log.Printf("[worker:%s] Snapshot delivered (%.1fKB in %v)",
-				w.profile.Name, float64(payloadBytes)/1024, collectDuration.Round(time.Millisecond))
+			audit.Info("upload.success", "Snapshot delivered",
+				append(w.targetFields(),
+					F("payload_bytes", payloadBytes),
+					F("duration_ms", collectDuration.Milliseconds()),
+				)...)
 		}
 	}
 }
@@ -265,17 +288,18 @@ func (w *Worker) handleError(err error) {
 	consecutive := w.state.ConsecutiveErrors
 	w.mu.Unlock()
 
-	log.Printf("[worker:%s] Collection error (%d/%d): %v",
-		w.profile.Name, consecutive, w.policy.MaxConsecutiveErrors, err)
+	audit.Error("collection.error", fmt.Sprintf("Collection error (%d/%d)",
+		consecutive, w.policy.MaxConsecutiveErrors),
+		append(w.targetFields(), Err(err))...)
 
 	if consecutive >= w.policy.MaxConsecutiveErrors {
 		w.setStatus(WorkerStatusDegraded)
-		log.Printf("[worker:%s] Marked DEGRADED after %d consecutive errors",
-			w.profile.Name, consecutive)
+		audit.Warn("worker.degraded", fmt.Sprintf("Marked DEGRADED after %d consecutive errors", consecutive),
+			w.targetFields()...)
 
 		// Apply backoff sleep
 		backoff := w.calculateBackoff(consecutive)
-		log.Printf("[worker:%s] Backing off for %v", w.profile.Name, backoff)
+		audit.Info("worker.degraded", "Backing off", append(w.targetFields(), F("backoff", backoff.String()))...)
 
 		select {
 		case <-time.After(backoff):
@@ -304,7 +328,10 @@ func (w *Worker) sendHeartbeat() {
 		"capabilities": w.adapter.Capabilities(),
 	}
 	if err := w.backend.Post(w.hostToken, payload); err != nil {
-		log.Printf("[worker:%s] Heartbeat failed: %v", w.profile.Name, err)
+		audit.Warn("heartbeat.failed", "Heartbeat failed",
+			append(w.targetFields(), Err(err))...)
+	} else {
+		audit.Debug("heartbeat.sent", "Heartbeat delivered", w.targetFields()...)
 	}
 }
 
