@@ -304,36 +304,9 @@ type HostState struct {
 	LastAckStatus    string    `json:"last_ack_status,omitempty"`
 }
 
-// SupportedTargetTypes lists all target types the host schema supports.
-var SupportedTargetTypes = []string{
-	"proxmox",
-	"truenas",
-	"nutanix",
-	"pure-storage",
-	"netapp-ontap",
-	"powerstore",
-	"powermax",
-	"powerflex",
-	"ollama",
-	"open-webui",
-	"prometheus",
-	"grafana",
-	"generic-http",
-	"kubernetes",
-	"nexus",
-	"ndfc",
-	"brocade",
-	"powerswitch",
-	"infiniband",
-	"bluefield",
-	"dell-idrac",
-	"linux",
-	"docker",
-	"cisco-mds",
-	"nvidia-sonic",
-	"sonic-community",
-	"emulex",
-}
+// SupportedTargetTypes is now generated in supported_types_gen.go
+// Source of truth: src/data/targetTypeRegistry.ts
+// Regenerate:      npx tsx scripts/sync-target-types.ts
 
 // IsValidTargetType checks if a target type is supported.
 func IsValidTargetType(t string) bool {
