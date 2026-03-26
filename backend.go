@@ -18,9 +18,16 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"runtime"
 	"strings"
 	"time"
 )
+
+// agentPlatform returns the OS for the X-Agent-Platform header.
+func agentPlatform() string { return runtime.GOOS }
+
+// agentArch returns the architecture for the X-Agent-Platform header.
+func agentArch() string { return runtime.GOARCH }
 
 const (
 	defaultBackendBase       = "https://yvtszwgcmgmqylmmybrh.supabase.co"
@@ -212,6 +219,7 @@ func (b *BackendClient) FetchUpdateManifest(token string) (*SignedUpdateManifest
 	}
 	req.Header.Set("X-Connector-Token", token)
 	req.Header.Set("X-Agent-Version", HostVersion)
+	req.Header.Set("X-Agent-Platform", fmt.Sprintf("%s/%s", agentPlatform(), agentArch()))
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := b.client.Do(req)

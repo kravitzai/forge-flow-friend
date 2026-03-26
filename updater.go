@@ -28,12 +28,58 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
 
+// ── Semver Parsing ──
+
+func parseSemverComponents(v string) (int, int, int, error) {
+	v = strings.TrimPrefix(v, "v")
+	parts := strings.SplitN(v, ".", 3)
+	if len(parts) != 3 {
+		return 0, 0, 0, fmt.Errorf("invalid semver: %s", v)
+	}
+	patchStr := strings.SplitN(parts[2], "-", 2)[0]
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	patch, err := strconv.Atoi(patchStr)
+	if err != nil {
+		return 0, 0, 0, err
+	}
+	return major, minor, patch, nil
+}
+
+func semverGreaterThan(aMaj, aMin, aPat, bMaj, bMin, bPat int) bool {
+	if aMaj != bMaj {
+		return aMaj > bMaj
+	}
+	if aMin != bMin {
+		return aMin > bMin
+	}
+	return aPat > bPat
+}
+
+func semverGreaterOrEqual(aMaj, aMin, aPat, bMaj, bMin, bPat int) bool {
+	if aMaj != bMaj {
+		return aMaj > bMaj
+	}
+	if aMin != bMin {
+		return aMin > bMin
+	}
+	return aPat >= bPat
+}
+
 // ── Trust Root ──
-const pinnedUpdatePublicKeyBase64 = "FORGEAI_UPDATE_SIGNING_KEY_PLACEHOLDER"
+// Public keys are stored in update_pubkey.go as UpdatePublicKeys map
 
 // ── Update Policy ──
 
@@ -81,22 +127,47 @@ func PolicyAllowsChannel(policy UpdatePolicy, channel ReleaseChannel) bool {
 // ── Versioned Update Manifest ──
 
 type SignedUpdateManifest struct {
+	SchemaVersion  int    `json:"schema_version"`
 	Version        string `json:"version"`
 	Channel        string `json:"channel"`
+	Platform       string `json:"platform"`
+	Arch           string `json:"arch"`
 	MinHostVersion string `json:"min_host_version,omitempty"`
 	ArtifactURL    string `json:"artifact_url"`
 	ArtifactName   string `json:"artifact_name"`
 	ArtifactSize   int64  `json:"artifact_size"`
 	SHA256         string `json:"sha256"`
 	Signature      string `json:"signature"`
+	KeyID          string `json:"key_id"`
 	ReleasedAt     string `json:"released_at"`
 	ReleaseNotes   string `json:"release_notes,omitempty"`
 }
 
+// CanonicalBytes produces a deterministic JSON byte sequence for signature
+// verification. Uses alphabetically-sorted keys with manual construction
+// to guarantee byte-identical output across Go versions and platforms.
+// NOTE: release_notes is intentionally excluded — it is user-facing content
+// that does not influence update security decisions.
 func (m *SignedUpdateManifest) CanonicalBytes() []byte {
-	canonical := fmt.Sprintf("forgeai-update-v1\nversion=%s\nchannel=%s\nartifact=%s\nsha256=%s\nsize=%d",
-		m.Version, m.Channel, m.ArtifactName, m.SHA256, m.ArtifactSize)
-	return []byte(canonical)
+	return []byte(fmt.Sprintf(
+		`{"arch":%s,"artifact_name":%s,"artifact_size":%d,"artifact_url":%s,"channel":%s,"min_host_version":%s,"platform":%s,"schema_version":%d,"sha256":%s,"version":%s}`,
+		jsonQuote(m.Arch),
+		jsonQuote(m.ArtifactName),
+		m.ArtifactSize,
+		jsonQuote(m.ArtifactURL),
+		jsonQuote(m.Channel),
+		jsonQuote(m.MinHostVersion),
+		jsonQuote(m.Platform),
+		m.SchemaVersion,
+		jsonQuote(m.SHA256),
+		jsonQuote(m.Version),
+	))
+}
+
+// jsonQuote produces a JSON-escaped quoted string
+func jsonQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // ── Staged Update State (persisted) ──
@@ -134,31 +205,48 @@ type UpdateManager struct {
 	backend    *BackendClient
 	supervisor *Supervisor
 	configDir  string
-	publicKey  ed25519.PublicKey
+	publicKeys map[string]ed25519.PublicKey // key_id → decoded public key
+	disabled   bool                         // true if no valid keys configured (fail-closed)
 	state      *StagedUpdateState
 }
 
 func NewUpdateManager(store *Store, backend *BackendClient, supervisor *Supervisor, configDir string) (*UpdateManager, error) {
 	um := &UpdateManager{
-		store:     store,
-		backend:   backend,
+		store:      store,
+		backend:    backend,
 		supervisor: supervisor,
-		configDir: configDir,
-		state:     &StagedUpdateState{},
+		configDir:  configDir,
+		publicKeys: make(map[string]ed25519.PublicKey),
+		state:      &StagedUpdateState{},
 	}
 
-	// Parse pinned public key
-	if pinnedUpdatePublicKeyBase64 != "FORGEAI_UPDATE_SIGNING_KEY_PLACEHOLDER" {
-		pubBytes, err := base64.StdEncoding.DecodeString(pinnedUpdatePublicKeyBase64)
-		if err != nil {
-			return nil, fmt.Errorf("decode pinned update public key: %w", err)
-		}
-		if len(pubBytes) != ed25519.PublicKeySize {
-			return nil, fmt.Errorf("pinned update public key wrong size: %d (expected %d)", len(pubBytes), ed25519.PublicKeySize)
-		}
-		um.publicKey = ed25519.PublicKey(pubBytes)
+	// ── Fail-closed key initialization ──
+	// Parse all configured public keys from update_pubkey.go
+	if !IsUpdateKeyConfigured() {
+		// No real keys configured — disable updates entirely (logged once at startup)
+		audit.Warn("update.disabled", "Update verification key not configured — update checks disabled")
+		um.disabled = true
 	} else {
-		audit.Warn("update.check", "No update signing key configured — update verification disabled")
+		for keyID, keyB64 := range UpdatePublicKeys {
+			if keyB64 == "" || keyB64 == "FORGEAI_UPDATE_SIGNING_KEY_PLACEHOLDER" {
+				continue
+			}
+			pubBytes, err := base64.StdEncoding.DecodeString(keyB64)
+			if err != nil {
+				return nil, fmt.Errorf("decode update public key %q: %w", keyID, err)
+			}
+			if len(pubBytes) != ed25519.PublicKeySize {
+				return nil, fmt.Errorf("update public key %q wrong size: %d (expected %d)", keyID, len(pubBytes), ed25519.PublicKeySize)
+			}
+			um.publicKeys[keyID] = ed25519.PublicKey(pubBytes)
+		}
+		if len(um.publicKeys) == 0 {
+			audit.Warn("update.disabled", "No valid update signing keys after parsing — update checks disabled")
+			um.disabled = true
+		} else {
+			audit.Info("update.check", "Update verification initialized",
+				F("key_count", fmt.Sprintf("%d", len(um.publicKeys))))
+		}
 	}
 
 	// Ensure staging directories exist
@@ -178,9 +266,20 @@ func NewUpdateManager(store *Store, backend *BackendClient, supervisor *Supervis
 // ── Signature Verification ──
 
 func (um *UpdateManager) VerifyManifest(manifest *SignedUpdateManifest) error {
-	if um.publicKey == nil {
-		return fmt.Errorf("no update signing key configured")
+	if um.disabled || len(um.publicKeys) == 0 {
+		return fmt.Errorf("no update signing keys configured — updates disabled")
 	}
+
+	keyID := manifest.KeyID
+	if keyID == "" {
+		keyID = "primary"
+	}
+
+	pubKey, ok := um.publicKeys[keyID]
+	if !ok {
+		return fmt.Errorf("unknown key_id %q — manifest not verifiable", keyID)
+	}
+
 	if manifest.Signature == "" {
 		return fmt.Errorf("manifest has no signature")
 	}
@@ -194,10 +293,15 @@ func (um *UpdateManager) VerifyManifest(manifest *SignedUpdateManifest) error {
 	}
 
 	canonical := manifest.CanonicalBytes()
-	if !ed25519.Verify(um.publicKey, canonical, sig) {
+	if !ed25519.Verify(pubKey, canonical, sig) {
+		audit.Critical("update.signature_invalid",
+			"Signature verification FAILED — manifest is not trusted",
+			F("version", manifest.Version), F("key_id", keyID))
 		return fmt.Errorf("signature verification FAILED — manifest is not trusted")
 	}
 
+	audit.Info("update.signature_valid", "Manifest signature verified",
+		F("version", manifest.Version), F("key_id", keyID))
 	return nil
 }
 
@@ -228,6 +332,13 @@ func (um *UpdateManager) CheckForUpdate(policy UpdatePolicy) (*SignedUpdateManif
 	defer um.mu.Unlock()
 
 	if policy == UpdatePolicyNone {
+		audit.Debug("update.check_skipped", "Update check skipped — policy is none")
+		return nil, nil
+	}
+
+	// Fail-closed: skip silently if disabled (logged once at startup)
+	if um.disabled {
+		audit.Debug("update.check_skipped", "Update check skipped — updater disabled")
 		return nil, nil
 	}
 
@@ -243,7 +354,7 @@ func (um *UpdateManager) CheckForUpdate(policy UpdatePolicy) (*SignedUpdateManif
 		return nil, fmt.Errorf("no connector token for update check")
 	}
 
-	audit.Info("update.check", "Checking for updates", F("policy", string(policy)))
+	audit.Debug("update.check_requested", "Checking for updates", F("policy", string(policy)))
 
 	manifest, err := um.backend.FetchUpdateManifest(token)
 	if err != nil {
@@ -251,26 +362,67 @@ func (um *UpdateManager) CheckForUpdate(policy UpdatePolicy) (*SignedUpdateManif
 	}
 
 	if manifest == nil {
+		audit.Debug("update.no_update", "No compatible update available from backend")
 		return nil, nil
 	}
 
+	audit.Info("update.manifest_received", "Update manifest received",
+		F("version", manifest.Version), F("channel", manifest.Channel),
+		F("key_id", manifest.KeyID))
+
+	// Check policy allows this channel
 	if !PolicyAllowsChannel(policy, ReleaseChannel(manifest.Channel)) {
-		audit.Info("update.check", "Update available but policy does not allow",
+		audit.Info("update.channel_rejected", "Update available but policy does not allow channel",
 			F("version", manifest.Version), F("channel", manifest.Channel), F("policy", string(policy)))
 		return nil, nil
 	}
 
-	if manifest.MinHostVersion != "" && manifest.MinHostVersion > HostVersion {
-		return nil, fmt.Errorf("update %s requires host >= %s (current: %s)",
-			manifest.Version, manifest.MinHostVersion, HostVersion)
+	// Verify key_id is known before proceeding
+	if manifest.KeyID != "" {
+		if _, ok := um.publicKeys[manifest.KeyID]; !ok {
+			audit.Warn("update.key_id_unknown",
+				"Manifest references unknown key_id — cannot verify",
+				F("key_id", manifest.KeyID), F("version", manifest.Version))
+			return nil, fmt.Errorf("unknown key_id %q in manifest", manifest.KeyID)
+		}
 	}
 
-	if manifest.Version == HostVersion {
+	// Semver comparison for min_host_version (defense-in-depth; backend also checks)
+	if manifest.MinHostVersion != "" {
+		minMaj, minMin, minPat, err := parseSemverComponents(manifest.MinHostVersion)
+		if err == nil {
+			curMaj, curMin, curPat, err2 := parseSemverComponents(HostVersion)
+			if err2 == nil && !semverGreaterOrEqual(curMaj, curMin, curPat, minMaj, minMin, minPat) {
+				audit.Info("update.incompatible", "Update requires newer host version",
+					F("update_version", manifest.Version),
+					F("min_host_version", manifest.MinHostVersion),
+					F("current_version", HostVersion))
+				return nil, fmt.Errorf("update %s requires host >= %s (current: %s)",
+					manifest.Version, manifest.MinHostVersion, HostVersion)
+			}
+		}
+	}
+
+	// Semver comparison: only update if manifest is strictly newer
+	mMaj, mMin, mPat, err := parseSemverComponents(manifest.Version)
+	if err != nil {
+		return nil, fmt.Errorf("parse manifest version: %w", err)
+	}
+	cMaj, cMin, cPat, err := parseSemverComponents(HostVersion)
+	if err != nil {
+		return nil, fmt.Errorf("parse host version: %w", err)
+	}
+	if !semverGreaterThan(mMaj, mMin, mPat, cMaj, cMin, cPat) {
+		audit.Debug("update.no_update", "Agent is up-to-date")
 		return nil, nil
 	}
 
+	audit.Info("update.compatible_found", "Compatible update found",
+		F("current", HostVersion), F("target", manifest.Version))
 	return manifest, nil
 }
+
+
 
 func (um *UpdateManager) StageUpdate(manifest *SignedUpdateManifest) error {
 	um.mu.Lock()
@@ -285,7 +437,7 @@ func (um *UpdateManager) StageUpdate(manifest *SignedUpdateManifest) error {
 		um.saveState()
 		return fmt.Errorf("manifest verification: %w", err)
 	}
-	audit.Info("update.staged", "Manifest signature verified")
+	audit.Info("update.signature_valid", "Manifest signature verified for staging")
 
 	// Step 2: Download artifact
 	stagedPath := filepath.Join(um.configDir, stagedBinaryDir, manifest.ArtifactName)
@@ -303,9 +455,12 @@ func (um *UpdateManager) StageUpdate(manifest *SignedUpdateManifest) error {
 		um.state.LastError = fmt.Sprintf("hash verification failed: %v", err)
 		um.state.ConsecutiveFails++
 		um.saveState()
+		audit.Critical("update.artifact_hash_invalid", "Artifact hash mismatch — aborting",
+			F("version", manifest.Version), Err(err))
 		return fmt.Errorf("artifact verification: %w", err)
 	}
-	audit.Info("update.staged", "Artifact SHA-256 verified")
+	audit.Info("update.artifact_hash_valid", "Artifact SHA-256 verified",
+		F("sha256", manifest.SHA256))
 
 	// Step 4: Make executable
 	if err := os.Chmod(stagedPath, 0755); err != nil {
