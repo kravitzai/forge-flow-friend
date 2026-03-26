@@ -61,6 +61,10 @@ func main() {
 		remoteRestart = true
 	}
 
+	// ── Parse change-operation policy from environment ──
+	changePolicyConfig := ParseChangePolicyFromEnv()
+	changePolicyConfig.LogStartupSummary()
+
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
 		configDir = defaultConfigDir
@@ -217,7 +221,7 @@ func main() {
 			syncInterval = time.Duration(state.Config.SyncIntervalSecs) * time.Second
 		}
 
-		syncManager = NewSyncManager(backend, store, supervisor)
+		syncManager = NewSyncManager(backend, store, supervisor, changePolicyConfig)
 		syncManager.Start(syncInterval)
 		audit.Info("sync.reconciled", "Desired-state sync enabled", F("interval", syncInterval.String()))
 	} else {

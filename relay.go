@@ -52,22 +52,32 @@ type RelayHandler struct {
 	backend    *BackendClient
 	store      *Store
 
-	// Safety allow-list: only read-only operations
+	// Safety allow-list: read-only is always allowed; "change" is policy-gated
 	allowedSafetyLevels map[string]bool
 
 	// Platform allow-list: only known platforms can be relayed
 	allowedPlatforms map[string]bool
+
+	// Change-operation policy — gates "change" safety level operations
+	changePolicy ChangePolicyConfig
 }
 
-// NewRelayHandler creates a relay handler.
-func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Store) *RelayHandler {
+// NewRelayHandler creates a relay handler with change-operation policy.
+func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Store, changePolicy ChangePolicyConfig) *RelayHandler {
+	safetyLevels := map[string]bool{
+		"read-only": true,
+	}
+	// If change policy is not deny, allow "change" safety level through to per-op authorization
+	if changePolicy.Policy != ChangePolicyDeny {
+		safetyLevels["change"] = true
+	}
+
 	return &RelayHandler{
-		supervisor: supervisor,
-		backend:    backend,
-		store:      store,
-		allowedSafetyLevels: map[string]bool{
-			"read-only": true,
-		},
+		supervisor:          supervisor,
+		backend:             backend,
+		store:               store,
+		changePolicy:        changePolicy,
+		allowedSafetyLevels: safetyLevels,
 		allowedPlatforms: map[string]bool{
 			"proxmox":         true,
 			"ollama":          true,
@@ -133,8 +143,22 @@ func (rh *RelayHandler) ProcessCommands(commands []RelayCommand) {
 		result := rh.executeCommand(cmd)
 		if result.ErrorMessage != "" {
 			log.Printf("[relay] cmd=%s FAILED: %s (duration=%dms)", cmd.ID, result.ErrorMessage, result.DurationMs)
+			// Audit change-op failures specifically
+			if cmd.SafetyLevel == "change" {
+				audit.Error("change_op.failed", "Change operation failed",
+					F("cmd_id", cmd.ID), F("operation_id", cmd.OperationID),
+					F("platform", cmd.Platform), F("error", result.ErrorMessage),
+					F("duration_ms", result.DurationMs))
+			}
 		} else {
 			log.Printf("[relay] cmd=%s OK: HTTP %d (duration=%dms)", cmd.ID, result.ResponseStatus, result.DurationMs)
+			// Audit change-op success
+			if cmd.SafetyLevel == "change" {
+				audit.Info("change_op.executed", "Change operation executed successfully",
+					F("cmd_id", cmd.ID), F("operation_id", cmd.OperationID),
+					F("platform", cmd.Platform), F("http_status", result.ResponseStatus),
+					F("duration_ms", result.DurationMs))
+			}
 		}
 		results = append(results, result)
 	}
@@ -164,7 +188,9 @@ func (rh *RelayHandler) executeCommand(cmd RelayCommand) RelayResult {
 
 	// Safety check — agent-side allow-list
 	if !rh.allowedSafetyLevels[cmd.SafetyLevel] {
-		log.Printf("[relay] REJECTED cmd=%s: safety level %q not allowed", cmd.ID, cmd.SafetyLevel)
+		audit.Warn("change_op.denied", "Safety level not allowed",
+			F("cmd_id", cmd.ID), F("safety_level", cmd.SafetyLevel),
+			F("operation_id", cmd.OperationID), F("platform", cmd.Platform))
 		return RelayResult{
 			ID:           cmd.ID,
 			ErrorMessage: fmt.Sprintf("safety level %q not allowed on agent", cmd.SafetyLevel),
@@ -172,17 +198,37 @@ func (rh *RelayHandler) executeCommand(cmd RelayCommand) RelayResult {
 		}
 	}
 
-	// Method allow-list
-	method := strings.ToUpper(cmd.Method)
-	if method != "GET" && method != "POST" {
-		// POST is allowed for read-only operations (e.g., Nutanix list, Ollama show)
-		if cmd.SafetyLevel != "read-only" {
-			log.Printf("[relay] REJECTED cmd=%s: method %q not allowed for safety %q", cmd.ID, method, cmd.SafetyLevel)
+	// Change-operation policy gate — authorize by operation ID
+	if cmd.SafetyLevel == "change" {
+		audit.Info("change_op.requested", "Change operation requested",
+			F("cmd_id", cmd.ID), F("operation_id", cmd.OperationID),
+			F("platform", cmd.Platform), F("method", cmd.Method),
+			F("path", cmd.Path), F("policy", string(rh.changePolicy.Policy)))
+
+		allowed, reason := rh.changePolicy.IsChangeOpAllowed(cmd.OperationID)
+		if !allowed {
+			audit.Warn("change_op.denied", "Change operation denied by policy",
+				F("cmd_id", cmd.ID), F("operation_id", cmd.OperationID),
+				F("platform", cmd.Platform), F("reason", reason))
 			return RelayResult{
 				ID:           cmd.ID,
-				ErrorMessage: fmt.Sprintf("method %q not allowed for safety level %q", method, cmd.SafetyLevel),
+				ErrorMessage: reason,
 				DurationMs:   time.Since(start).Milliseconds(),
 			}
+		}
+		audit.Info("change_op.allowed", "Change operation authorized",
+			F("cmd_id", cmd.ID), F("operation_id", cmd.OperationID),
+			F("platform", cmd.Platform), F("policy", string(rh.changePolicy.Policy)))
+	}
+
+	// Method allow-list — POST is allowed for read-only ops and authorized change ops
+	method := strings.ToUpper(cmd.Method)
+	if method != "GET" && method != "POST" {
+		log.Printf("[relay] REJECTED cmd=%s: method %q not allowed", cmd.ID, method)
+		return RelayResult{
+			ID:           cmd.ID,
+			ErrorMessage: fmt.Sprintf("method %q not allowed", method),
+			DurationMs:   time.Since(start).Milliseconds(),
 		}
 	}
 

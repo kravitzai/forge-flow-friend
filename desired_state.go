@@ -115,7 +115,7 @@ type SyncManager struct {
 	lastRejected []RejectedProfile
 }
 
-func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor) *SyncManager {
+func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor, changePolicy ChangePolicyConfig) *SyncManager {
 	kp, err := store.LoadKeyPair()
 	if err != nil {
 		audit.Warn("sync.error", "Failed to load host keypair", Err(err))
@@ -130,7 +130,7 @@ func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor
 		supervisor:   supervisor,
 		validator:    NewProfileValidator(),
 		hostKeyPair:  kp,
-		relayHandler: NewRelayHandler(supervisor, backend, store),
+		relayHandler: NewRelayHandler(supervisor, backend, store, changePolicy),
 		interval:     60 * time.Second,
 		fastInterval: 5 * time.Second,
 		done:         make(chan struct{}),
