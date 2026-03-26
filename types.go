@@ -325,6 +325,14 @@ var SupportedTargetTypes = []string{
 	"brocade",
 	"powerswitch",
 	"infiniband",
+	"bluefield",
+	"dell-idrac",
+	"linux",
+	"docker",
+	"cisco-mds",
+	"nvidia-sonic",
+	"sonic-community",
+	"emulex",
 }
 
 // IsValidTargetType checks if a target type is supported.
