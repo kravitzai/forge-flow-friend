@@ -21,6 +21,7 @@ COPY --from=builder /build/connector-agent /usr/local/bin/connector-agent
 
 LABEL org.opencontainers.image.source="https://github.com/kravitzai/forge-flow-friend"
 LABEL org.opencontainers.image.description="ForgeAI Connector Host — Multi-Target Agent"
+LABEL org.opencontainers.image.vendor="ForgeAI"
 
 # Non-root user + config directory
 # Create dirs BEFORE declaring VOLUME so ownership is baked into the image layer.

@@ -38,13 +38,14 @@ type BackendClient struct {
 }
 
 // NewBackendClient creates a backend client with the given base URL.
+// Uses the centralized HTTP client factory for proxy and TLS support.
 func NewBackendClient(baseURL string) *BackendClient {
 	if baseURL == "" {
 		baseURL = defaultBackendBase
 	}
 	return &BackendClient{
 		BaseURL: baseURL,
-		client:  &http.Client{Timeout: 15 * time.Second},
+		client:  NewHTTPClient(nil, nil, 15*time.Second),
 	}
 }
 

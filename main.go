@@ -41,6 +41,15 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.LUTC)
 	log.Printf("[host] ForgeAI Connector Host v%s starting", HostVersion)
 
+	// ── Read remote action opt-in flags from environment ──
+	remoteLiveQuery := envBool("FORGEAI_REMOTE_LIVE_QUERY")
+	remoteRestart := envBool("FORGEAI_REMOTE_RESTART")
+	// Convenience flag: --enable-remote-actions sets both
+	if envBool("FORGEAI_REMOTE_ACTIONS") {
+		remoteLiveQuery = true
+		remoteRestart = true
+	}
+
 	configDir := os.Getenv("CONFIG_DIR")
 	if configDir == "" {
 		configDir = defaultConfigDir
@@ -144,6 +153,21 @@ func main() {
 	}
 
 	log.Printf("[host] Configured targets: %d", supervisor.TargetCount())
+
+	// Apply remote action flags to host config
+	if state := supervisor.GetState(); state != nil {
+		if remoteLiveQuery {
+			state.Config.RemoteLiveQueryEnabled = true
+		}
+		if remoteRestart {
+			state.Config.RemoteRestartEnabled = true
+		}
+		if remoteLiveQuery || remoteRestart {
+			log.Printf("[host] Remote actions: live_query=%v restart=%v", state.Config.RemoteLiveQueryEnabled, state.Config.RemoteRestartEnabled)
+		} else {
+			log.Printf("[host] Remote actions: disabled (set FORGEAI_REMOTE_LIVE_QUERY=true and/or FORGEAI_REMOTE_RESTART=true to enable)")
+		}
+	}
 
 	// ── Upload Queue ──
 	uploadQueue := NewUploadQueue(backend, DefaultUploadQueueConfig())
@@ -351,4 +375,10 @@ func detectLegacyEnvConfig() *Config {
 	}
 
 	return c
+}
+
+// envBool returns true if the named environment variable is set to "true" or "1".
+func envBool(name string) bool {
+	v := os.Getenv(name)
+	return v == "true" || v == "1"
 }

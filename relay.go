@@ -12,7 +12,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,8 +110,24 @@ func (rh *RelayHandler) ProcessCommands(commands []RelayCommand) {
 
 	log.Printf("[relay] Processing %d pending command(s)", len(commands))
 
+	// Check remote actions gate (system commands have their own granular gate)
+	hostState := rh.supervisor.GetState()
+	liveQueryEnabled := hostState != nil && hostState.Config.RemoteLiveQueryEnabled
+
 	results := make([]RelayResult, 0, len(commands))
 	for _, cmd := range commands {
+		// System commands (restart, version) bypass the live query gate —
+		// they have their own granular check in system_commands.go
+		if cmd.Platform != "system" && !liveQueryEnabled {
+			log.Printf("[relay] REJECTED cmd=%s: remote Live Query is disabled on this host (set FORGEAI_REMOTE_LIVE_QUERY=true to enable)", cmd.ID)
+			results = append(results, RelayResult{
+				ID:           cmd.ID,
+				ErrorMessage: "Remote Live Query is disabled on this host. Set FORGEAI_REMOTE_LIVE_QUERY=true or enable via host config.",
+				DurationMs:   0,
+			})
+			continue
+		}
+
 		log.Printf("[relay] Executing cmd=%s platform=%s op=%s path=%s safety=%s",
 			cmd.ID, cmd.Platform, cmd.OperationID, cmd.Path, cmd.SafetyLevel)
 		result := rh.executeCommand(cmd)
@@ -380,15 +395,9 @@ func applyProxmoxAuth(req *http.Request, target *TargetProfile, creds map[string
 	log.Printf("[relay] Applied Proxmox API token auth from target_config + encrypted secret")
 }
 
-// buildHTTPClient creates an HTTP client respecting TLS config.
+// buildHTTPClient creates an HTTP client respecting TLS and proxy config.
 func buildHTTPClient(target *TargetProfile) *http.Client {
-	transport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: target.TLS.InsecureSkipVerify},
-	}
-	return &http.Client{
-		Transport: transport,
-		Timeout:   60 * time.Second,
-	}
+	return NewHTTPClientFromProfile(target, 60*time.Second)
 }
 
 // postResults sends relay results back to the cloud.
@@ -420,7 +429,7 @@ func (rh *RelayHandler) postResults(results []RelayResult) {
 	req.Header.Set("X-Connector-Token", token)
 	req.Header.Set("X-Agent-Version", HostVersion)
 
-	client := &http.Client{Timeout: 15 * time.Second}
+	client := NewHTTPClient(nil, nil, 15*time.Second)
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[relay] Failed to post results: %v", err)

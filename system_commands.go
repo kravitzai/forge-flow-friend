@@ -14,11 +14,23 @@ import (
 )
 
 // executeSystemCommand handles platform="system" commands (restart, version, etc.).
+// Each operation checks its own granular permission flag.
 func (rh *RelayHandler) executeSystemCommand(cmd RelayCommand, start time.Time) RelayResult {
 	switch cmd.OperationID {
 	case "agent-restart":
+		// Check granular restart permission
+		hostState := rh.supervisor.GetState()
+		if hostState == nil || !hostState.Config.RemoteRestartEnabled {
+			log.Printf("[system] REJECTED restart cmd=%s: remote restart is disabled (set FORGEAI_REMOTE_RESTART=true to enable)", cmd.ID)
+			return RelayResult{
+				ID:           cmd.ID,
+				ErrorMessage: "Remote restart is disabled on this host. Set FORGEAI_REMOTE_RESTART=true or enable via host config.",
+				DurationMs:   time.Since(start).Milliseconds(),
+			}
+		}
 		return rh.handleAgentRestart(cmd, start)
 	case "agent-version":
+		// Version query is always allowed (informational only)
 		return rh.handleAgentVersion(cmd, start)
 	default:
 		return RelayResult{

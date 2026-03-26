@@ -53,6 +53,8 @@ INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/etc/forgeai"
 SERVICE_USER="forgeai"
 FORCE_RESET_STATE=false
+REMOTE_LIVE_QUERY=false
+REMOTE_RESTART=false
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -74,6 +76,9 @@ while [[ $# -gt 0 ]]; do
     --poll-interval)        POLL_INTERVAL_SECONDS="$2"; shift 2 ;;
     --config-dir)           CONFIG_DIR="$2";            shift 2 ;;
     --force-reset-state)    FORCE_RESET_STATE=true;     shift ;;
+    --enable-remote-actions) REMOTE_LIVE_QUERY=true; REMOTE_RESTART=true; shift ;;
+    --enable-live-query)    REMOTE_LIVE_QUERY=true;     shift ;;
+    --enable-remote-restart) REMOTE_RESTART=true;       shift ;;
     *) echo "Unknown option: $1"; exit 1 ;;
   esac
 done
@@ -436,6 +441,8 @@ if [ "$EXISTING_INSTALL" = false ]; then
 FORGEAI_ENROLLMENT_TOKEN=${ENROLLMENT_TOKEN}
 CONFIG_DIR=${CONFIG_DIR}
 HOST_LABEL=${HOST_LABEL}
+FORGEAI_REMOTE_LIVE_QUERY=${REMOTE_LIVE_QUERY}
+FORGEAI_REMOTE_RESTART=${REMOTE_RESTART}
 EOF
 
     # If initial target settings are provided, store them as bootstrap hints.

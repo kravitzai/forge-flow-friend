@@ -6,6 +6,11 @@
 #   - Push to main → build + push Docker :latest
 #   - Push a tag like v0.1.0 → build + release + Docker :version
 #   - workflow_dispatch for manual builds
+#
+# Supply-chain provenance:
+#   - SHA-256 checksums for all release binaries
+#   - SPDX SBOM for Docker image (via anchore/sbom-action)
+#   - Cosign keyless signatures for Docker images and binary blobs
 
 name: Connector Publish
 
@@ -22,6 +27,7 @@ on:
 permissions:
   contents: write
   packages: write
+  id-token: write  # Required for cosign keyless signing (GitHub OIDC)
 
 env:
   REGISTRY: ghcr.io
@@ -71,6 +77,8 @@ jobs:
   docker:
     needs: validate
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
 
@@ -93,6 +101,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v') }}
 
       - name: Build and push
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: .
@@ -103,7 +112,39 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/kravitzai/forge-flow-friend
             org.opencontainers.image.description=ForgeAI Connector Host — Multi-Target Agent
+            org.opencontainers.image.vendor=ForgeAI
             org.opencontainers.image.licenses=MIT
+
+      # ── Cosign: sign Docker image (keyless via GitHub OIDC) ──
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign Docker image
+        run: |
+          cosign sign --yes \
+            "${{ env.IMAGE_NAME }}@${{ steps.build.outputs.digest }}"
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+
+  # ── SBOM generation (attached to GitHub Release on tags) ──
+  sbom:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: docker
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Generate SBOM from Docker image
+        uses: anchore/sbom-action@v0
+        with:
+          image: "${{ env.IMAGE_NAME }}@${{ needs.docker.outputs.digest }}"
+          format: spdx-json
+          output-file: connector-agent-sbom.spdx.json
+
+      - name: Upload SBOM to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: connector-agent-sbom.spdx.json
 
   # ── Binary artifacts → GitHub Release ──
   release-binaries:
@@ -135,7 +176,25 @@ jobs:
           go build -ldflags="-s -w -X main.HostVersion=${{ github.ref_name }}" -o "$OUTNAME" .
           tar czf "${OUTNAME}.tar.gz" "$OUTNAME"
 
+      # ── SHA-256 checksums ──
+      - name: Generate checksums
+        run: |
+          sha256sum connector-agent-*.tar.gz > connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.sha256
+
+      # ── Cosign: sign binary blob (keyless via GitHub OIDC) ──
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign binary tarball
+        run: |
+          cosign sign-blob --yes \
+            --bundle "connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz.bundle" \
+            "connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}.tar.gz"
+
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: connector-agent-*.tar.gz
+          files: |
+            connector-agent-*.tar.gz
+            connector-agent-*.tar.gz.sha256
+            connector-agent-*.tar.gz.bundle
