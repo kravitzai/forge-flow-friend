@@ -174,6 +174,9 @@ type SyncManager struct {
 	done         chan struct{}
 	// fastPollUntil: when set to a future time, use fastInterval instead of interval
 	fastPollUntil time.Time
+	// lastRejected tracks profiles rejected during the most recent sync cycle,
+	// so sendAck can report them with error status to the control plane.
+	lastRejected []RejectedProfile
 }
 
 // NewSyncManager creates a sync manager.
@@ -370,6 +373,9 @@ func (sm *SyncManager) fetchAndReconcile() {
 		}
 	}
 
+	// Store rejected profiles so sendAck can include them in target_statuses
+	sm.lastRejected = rejected
+
 	// Apply host config overrides if provided
 	if payload.HostConfig != nil {
 		sm.applyHostConfig(payload.HostConfig)
@@ -550,7 +556,7 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 		return
 	}
 
-	// Build per-target status map
+	// Build per-target status map from running targets
 	targetStatuses := make(map[string]TargetAckStatus)
 	for _, t := range sm.supervisor.GetTargets() {
 		ts := TargetAckStatus{Status: string(t.Status)}
@@ -564,6 +570,23 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 			}
 		}
 		targetStatuses[t.TargetID] = ts
+	}
+
+	// Include rejected targets so the control plane knows they failed
+	for _, r := range sm.lastRejected {
+		targetStatuses[r.TargetID] = TargetAckStatus{
+			Status: "error",
+			Error:  fmt.Sprintf("rejected: %s", r.Reason),
+		}
+	}
+
+	// Downgrade overall status if any targets were rejected
+	if len(sm.lastRejected) > 0 && status == "applied" {
+		if len(sm.supervisor.GetTargets()) > 0 {
+			status = "partial"
+		} else {
+			status = "failed"
+		}
 	}
 
 	ack := AckPayload{
