@@ -68,21 +68,11 @@ func (a *IdracAdapter) Collect() (map[string]interface{}, error) {
 	storage, _ := a.apiGetMembers("/redfish/v1/Systems/System.Embedded.1/Storage")
 	selEntries, _ := a.apiGetMembers("/redfish/v1/Systems/System.Embedded.1/LogServices/Sel/Entries")
 
-	// Cap SEL entries to 50
 	if len(selEntries) > 50 {
 		selEntries = selEntries[:50]
 	}
 
-	snapshotData := map[string]interface{}{
-		"system":     system,
-		"power":      power,
-		"thermal":    thermal,
-		"processors": processors,
-		"memory":     memory,
-		"storage":    storage,
-		"selEntries": selEntries,
-	}
-
+	snapshotData := normalizeIdracSnapshot(system, power, thermal, processors, memory, storage, selEntries)
 	alertList := extractIdracAlerts(system, selEntries)
 
 	return map[string]interface{}{
@@ -157,6 +147,171 @@ func (a *IdracAdapter) apiGetMembers(path string) ([]interface{}, error) {
 		return []interface{}{collection}, nil
 	}
 	return members, nil
+}
+
+func normalizeIdracSnapshot(system, power, thermal map[string]interface{}, processors, memory, storage, selEntries []interface{}) map[string]interface{} {
+	out := map[string]interface{}{}
+
+	// System fields
+	if system != nil {
+		out["hostname"] = strField(system, "HostName")
+		out["model"] = strField(system, "Model")
+		out["serialNumber"] = strField(system, "SerialNumber")
+		out["biosVersion"] = strField(system, "BiosVersion")
+		out["powerState"] = strField(system, "PowerState")
+		out["indicatorLED"] = strField(system, "IndicatorLED")
+		if status, ok := system["Status"].(map[string]interface{}); ok {
+			out["health"] = strField(status, "Health")
+			out["healthRollup"] = strField(status, "HealthRollup")
+		}
+	}
+
+	// Power
+	if power != nil {
+		if controls, ok := power["PowerControl"].([]interface{}); ok && len(controls) > 0 {
+			if pc, ok := controls[0].(map[string]interface{}); ok {
+				if w, ok := pc["PowerConsumedWatts"].(float64); ok {
+					out["powerConsumedWatts"] = w
+				}
+			}
+		}
+		if psus, ok := power["PowerSupplies"].([]interface{}); ok {
+			out["psuCount"] = len(psus)
+			var psuHealth []string
+			for _, p := range psus {
+				if pm, ok := p.(map[string]interface{}); ok {
+					h := "OK"
+					if st, ok := pm["Status"].(map[string]interface{}); ok {
+						if hv, ok := st["Health"].(string); ok {
+							h = hv
+						}
+					}
+					psuHealth = append(psuHealth, h)
+				}
+			}
+			out["psuHealth"] = psuHealth
+		}
+	}
+
+	// Thermal
+	if thermal != nil {
+		if temps, ok := thermal["Temperatures"].([]interface{}); ok {
+			var tList []map[string]interface{}
+			for _, t := range temps {
+				if tm, ok := t.(map[string]interface{}); ok {
+					entry := map[string]interface{}{
+						"name":           strField(tm, "Name"),
+						"readingCelsius": numField(tm, "ReadingCelsius"),
+						"health":         statusHealth(tm),
+					}
+					if thresh, ok := tm["UpperThresholdCritical"].(float64); ok {
+						entry["threshold"] = thresh
+					}
+					tList = append(tList, entry)
+				}
+			}
+			out["temperatures"] = tList
+		}
+		if fans, ok := thermal["Fans"].([]interface{}); ok {
+			var fList []map[string]interface{}
+			for _, f := range fans {
+				if fm, ok := f.(map[string]interface{}); ok {
+					fList = append(fList, map[string]interface{}{
+						"name":    strField(fm, "Name"),
+						"reading": numField(fm, "Reading"),
+						"health":  statusHealth(fm),
+					})
+				}
+			}
+			out["fans"] = fList
+		}
+	}
+
+	// Processors
+	if len(processors) > 0 {
+		var pList []map[string]interface{}
+		for _, p := range processors {
+			if pm, ok := p.(map[string]interface{}); ok {
+				pList = append(pList, map[string]interface{}{
+					"id":     strField(pm, "Id"),
+					"model":  strField(pm, "Name"),
+					"cores":  numField(pm, "TotalCores"),
+					"health": statusHealth(pm),
+				})
+			}
+		}
+		out["processors"] = pList
+	}
+
+	// Memory
+	if len(memory) > 0 {
+		var mList []map[string]interface{}
+		for _, m := range memory {
+			if mm, ok := m.(map[string]interface{}); ok {
+				mList = append(mList, map[string]interface{}{
+					"id":          strField(mm, "Id"),
+					"capacityMiB": numField(mm, "CapacityMiB"),
+					"health":      statusHealth(mm),
+				})
+			}
+		}
+		out["memoryModules"] = mList
+	}
+
+	// Storage
+	if len(storage) > 0 {
+		var sList []map[string]interface{}
+		for _, s := range storage {
+			if sm, ok := s.(map[string]interface{}); ok {
+				sList = append(sList, map[string]interface{}{
+					"id":     strField(sm, "Id"),
+					"model":  strField(sm, "Name"),
+					"health": statusHealth(sm),
+				})
+			}
+		}
+		out["storageControllers"] = sList
+	}
+
+	// SEL entries
+	if len(selEntries) > 0 {
+		var eList []map[string]interface{}
+		for _, e := range selEntries {
+			if em, ok := e.(map[string]interface{}); ok {
+				eList = append(eList, map[string]interface{}{
+					"severity": strField(em, "Severity"),
+					"message":  strField(em, "Message"),
+					"created":  strField(em, "Created"),
+				})
+			}
+		}
+		out["selEntries"] = eList
+	}
+
+	return out
+}
+
+func strField(m map[string]interface{}, key string) string {
+	if v, ok := m[key].(string); ok {
+		return v
+	}
+	return ""
+}
+
+func numField(m map[string]interface{}, key string) float64 {
+	if v, ok := m[key].(float64); ok {
+		return v
+	}
+	return 0
+}
+
+func statusHealth(m map[string]interface{}) string {
+	if st, ok := m["Status"].(map[string]interface{}); ok {
+		if h, ok := st["Health"].(string); ok {
+			return h
+		}
+	}
+	return "OK"
 }
 
 func extractIdracAlerts(system map[string]interface{}, selEntries []interface{}) []map[string]interface{} {
