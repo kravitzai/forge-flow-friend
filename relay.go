@@ -307,6 +307,14 @@ func (rh *RelayHandler) executeTrueNAS(cmd RelayCommand, target *TargetProfile, 
 
 	// Map middleware method to REST API v2 path
 	restPath := truenasMethodToREST(method)
+
+	// For get_instance methods, extract the ID from JSON-RPC params and append /id/{id}
+	if strings.HasSuffix(method, ".get_instance") {
+		if id := extractTrueNASInstanceID(cmd.Body); id != "" {
+			restPath = strings.TrimSuffix(restPath, "/get_instance") + "/id/" + id
+		}
+	}
+
 	fullURL := joinURL(target.Endpoint, "/api/v2.0/"+restPath)
 
 	audit.Debug("relay.truenas", "TrueNAS dispatch",
@@ -399,6 +407,24 @@ func truenasMethodToREST(method string) string {
 	default:
 		return strings.Join(parts, "/")
 	}
+}
+
+// extractTrueNASInstanceID extracts the first positional ID from a JSON-RPC params array.
+// The request body has shape: { "params": [id, ...], ... }
+func extractTrueNASInstanceID(body map[string]interface{}) string {
+	if body == nil {
+		return ""
+	}
+	params, ok := body["params"]
+	if !ok {
+		return ""
+	}
+	arr, ok := params.([]interface{})
+	if !ok || len(arr) == 0 {
+		return ""
+	}
+	// ID can be numeric or string
+	return fmt.Sprintf("%v", arr[0])
 }
 
 // joinURL safely joins a base endpoint URL and a path segment,
