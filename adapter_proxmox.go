@@ -65,6 +65,12 @@ func (a *ProxmoxAdapter) Init(profile *TargetProfile, creds map[string]string) e
 		log.Printf("[proxmox:%s] Authentication successful", profile.Name)
 	} else {
 		log.Printf("[proxmox:%s] Using API token: %s", profile.Name, cfg.ProxmoxTokenID)
+		// Verify connectivity immediately so the worker fails fast
+		// instead of waiting for 5 consecutive collection errors.
+		if err := a.HealthCheck(); err != nil {
+			return fmt.Errorf("initial connectivity check failed: %w", err)
+		}
+		log.Printf("[proxmox:%s] Connectivity verified", profile.Name)
 	}
 
 	return nil
