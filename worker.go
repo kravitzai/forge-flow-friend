@@ -318,28 +318,62 @@ func (w *Worker) calculateBackoff(consecutive int) time.Duration {
 	return time.Duration(backoff)
 }
 
-// sendHeartbeat sends a heartbeat for this worker's target.
+// sendHeartbeat sends a heartbeat for this worker's target,
+// including current worker health state so the backend can
+// track target-level health independently of agent liveness.
+//
+// Status vocabulary mapping (agent → backend):
+//   running  → active
+//   degraded → degraded
+//   failed   → failed
 func (w *Worker) sendHeartbeat() {
+	// Capture state under lock, release before network I/O
+	w.mu.RLock()
+	workerStatus := string(w.state.Status)
+	lastErr := w.state.LastError
+	consecutiveErrors := w.state.ConsecutiveErrors
+	w.mu.RUnlock()
+
 	payload := map[string]interface{}{
-		"type":         "heartbeat",
-		"agentVersion": HostVersion,
-		"targetId":     w.profile.TargetID,
-		"targetType":   w.profile.TargetType,
-		"capabilities": w.adapter.Capabilities(),
+		"type":              "heartbeat",
+		"agentVersion":      HostVersion,
+		"targetId":          w.profile.TargetID,
+		"targetType":        w.profile.TargetType,
+		"capabilities":      w.adapter.Capabilities(),
+		"workerStatus":      workerStatus,
+		"consecutiveErrors": consecutiveErrors,
 	}
+	if lastErr != "" {
+		payload["lastError"] = lastErr
+	}
+
 	if err := w.backend.Post(w.hostToken, payload); err != nil {
 		audit.Warn("heartbeat.failed", "Heartbeat failed",
 			append(w.targetFields(), Err(err))...)
 	} else {
-		audit.Debug("heartbeat.sent", "Heartbeat delivered", w.targetFields()...)
+		audit.Debug("heartbeat.sent", "Heartbeat delivered",
+			append(w.targetFields(), F("workerStatus", workerStatus))...)
 	}
 }
 
 func (w *Worker) setStatus(status WorkerStatus) {
 	w.mu.Lock()
+	prev := w.state.Status
 	w.state.Status = status
 	w.mu.Unlock()
+
 	w.notifyStateChange(status)
+
+	// Send an immediate heartbeat on real state transitions into
+	// degraded/failed (so the backend learns quickly) and on recovery
+	// back to running (so stale error state clears promptly).
+	// Only fires on actual changes to avoid heartbeat spam.
+	if prev != status {
+		switch status {
+		case WorkerStatusDegraded, WorkerStatusFailed, WorkerStatusRunning:
+			w.sendHeartbeat()
+		}
+	}
 }
 
 func (w *Worker) notifyStateChange(status WorkerStatus) {
