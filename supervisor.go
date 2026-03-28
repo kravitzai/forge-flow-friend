@@ -14,24 +14,28 @@ import (
 
 // Supervisor manages the lifecycle of all target workers.
 type Supervisor struct {
-	mu          sync.RWMutex
-	store       *Store
-	state       *HostState
-	workers     map[string]*Worker // targetID -> worker
-	adapters    map[string]AdapterFactory
-	backend     *BackendClient
-	policy      RetryPolicy
-	uploadQueue *UploadQueue // shared upload queue (nil = inline)
+	mu            sync.RWMutex
+	store         *Store
+	state         *HostState
+	workers       map[string]*Worker // targetID -> worker
+	adapters      map[string]AdapterFactory
+	backend       *BackendClient
+	policy        RetryPolicy
+	uploadQueue   *UploadQueue           // shared upload queue (nil = inline)
+	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
+	failedRetries map[string]int         // targetID -> consecutive retry count
 }
 
 // NewSupervisor creates a new supervisor with the given store and backend.
 func NewSupervisor(store *Store, backend *BackendClient) *Supervisor {
 	return &Supervisor{
-		store:    store,
-		workers:  make(map[string]*Worker),
-		adapters: make(map[string]AdapterFactory),
-		backend:  backend,
-		policy:   DefaultRetryPolicy(),
+		store:         store,
+		workers:       make(map[string]*Worker),
+		adapters:      make(map[string]AdapterFactory),
+		backend:       backend,
+		policy:        DefaultRetryPolicy(),
+		failedRetryAt: make(map[string]time.Time),
+		failedRetries: make(map[string]int),
 	}
 }
 
@@ -158,9 +162,39 @@ func (s *Supervisor) Reconcile() error {
 			continue
 		}
 
-		// Case 3: Worker already running — check if config changed
+		// Case 3: Worker already running — check if failed and needs retry
 		if hasWorker {
-			continue
+			ws := existing.State()
+			if ws.Status == WorkerStatusFailed {
+				// Check if enough time has passed for a retry
+				retryAt, hasRetryTime := s.failedRetryAt[target.TargetID]
+				if hasRetryTime && time.Now().Before(retryAt) {
+					continue // too soon to retry
+				}
+
+				audit.Info("worker.retry", "Retrying failed worker",
+					Target(target.TargetID, target.TargetType, target.Name)...)
+				existing.Stop()
+				delete(s.workers, target.TargetID)
+
+				// Calculate next retry backoff: 60s, 120s, 240s, capped at 5min
+				retryCount := s.failedRetries[target.TargetID] + 1
+				s.failedRetries[target.TargetID] = retryCount
+				backoff := time.Duration(60) * time.Second
+				for i := 1; i < retryCount && backoff < 5*time.Minute; i++ {
+					backoff *= 2
+				}
+				if backoff > 5*time.Minute {
+					backoff = 5 * time.Minute
+				}
+				s.failedRetryAt[target.TargetID] = time.Now().Add(backoff)
+				// Fall through to Case 4 to start a fresh worker
+			} else {
+				// Clear retry tracking on healthy workers
+				delete(s.failedRetryAt, target.TargetID)
+				delete(s.failedRetries, target.TargetID)
+				continue
+			}
 		}
 
 		// Case 4: No worker — start one

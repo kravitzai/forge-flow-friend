@@ -157,10 +157,15 @@ func (w *Worker) run() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
+	heartbeatTicker := time.NewTicker(60 * time.Second)
+	defer heartbeatTicker.Stop()
+
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
+		case <-heartbeatTicker.C:
+			w.sendHeartbeat()
 		case <-ticker.C:
 			if w.profile.Paused {
 				continue
@@ -172,6 +177,15 @@ func (w *Worker) run() {
 
 // collect performs one collection cycle with retry/backoff handling.
 func (w *Worker) collect() {
+	// Pre-flight health check — fast connectivity validation
+	if err := w.adapter.HealthCheck(); err != nil {
+		audit.Warn("healthcheck.failed", "Target health check failed",
+			append(w.targetFields(), Err(err))...)
+		w.handleError(fmt.Errorf("health check failed: %w", err))
+		w.sendHeartbeat()
+		return
+	}
+
 	collectStart := time.Now()
 	payload, err := w.adapter.Collect()
 	collectDuration := time.Since(collectStart)
@@ -291,6 +305,16 @@ func (w *Worker) handleError(err error) {
 	audit.Error("collection.error", fmt.Sprintf("Collection error (%d/%d)",
 		consecutive, w.policy.MaxConsecutiveErrors),
 		append(w.targetFields(), Err(err))...)
+
+	// Escalate to failed after sustained errors — signals supervisor to retry
+	if w.policy.FailedAfterErrors > 0 && consecutive >= w.policy.FailedAfterErrors {
+		w.setStatus(WorkerStatusFailed)
+		audit.Error("worker.failed", fmt.Sprintf("Marked FAILED after %d consecutive errors — worker exiting for supervisor retry", consecutive),
+			w.targetFields()...)
+		// Cancel our own context to exit the run() loop
+		w.cancel()
+		return
+	}
 
 	if consecutive >= w.policy.MaxConsecutiveErrors {
 		w.setStatus(WorkerStatusDegraded)

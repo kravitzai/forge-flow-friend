@@ -174,6 +174,7 @@ type RetryPolicy struct {
 	InitialBackoff       time.Duration `json:"initial_backoff"`
 	MaxBackoff           time.Duration `json:"max_backoff"`
 	BackoffMultiplier    float64       `json:"backoff_multiplier"`
+	FailedAfterErrors    int           `json:"failed_after_errors"` // escalate degraded→failed after this many errors (0 = never)
 }
 
 // DefaultRetryPolicy returns production-safe defaults.
@@ -183,6 +184,7 @@ func DefaultRetryPolicy() RetryPolicy {
 		InitialBackoff:       10 * time.Second,
 		MaxBackoff:           5 * time.Minute,
 		BackoffMultiplier:    2.0,
+		FailedAfterErrors:    20,
 	}
 }
 
