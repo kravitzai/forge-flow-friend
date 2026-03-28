@@ -19,20 +19,20 @@ import (
 )
 
 // ── TrueNAS snapshot data models ──
+// JSON tags MUST match the TypeScript TrueNAS*Snapshot interfaces in src/types/connector.ts
 
 type TrueNASPoolSnapshot struct {
-	Name         string  `json:"name"`
-	Status       string  `json:"status"`        // ONLINE, DEGRADED, FAULTED, OFFLINE
-	Healthy      bool    `json:"healthy"`
-	Path         string  `json:"path"`
-	Size         *int64  `json:"size"`
-	Allocated    *int64  `json:"allocated"`
-	Free         *int64  `json:"free"`
-	Fragmentation *int64 `json:"fragmentation"` // percentage
-	ReadOnly     bool    `json:"read_only"`
-	ScanState    string  `json:"scan_state"`    // scrub/resilver status
-	ScanErrors   *int64  `json:"scan_errors"`
-	TopologyVdevs []TrueNASVdev `json:"topology_vdevs,omitempty"`
+	Name               string  `json:"name"`
+	GUID               string  `json:"guid"`
+	Status             string  `json:"status"`             // online, degraded, faulted, offline
+	Healthy            bool    `json:"healthy"`
+	CapacityBytes      *int64  `json:"capacity_bytes"`
+	UsedBytes          *int64  `json:"used_bytes"`
+	FragmentationPct   *int64  `json:"fragmentation_pct"`
+	LastScrubAt        string  `json:"last_scrub_at"`
+	LastScrubErrors    *int64  `json:"last_scrub_errors"`
+	ResilverInProgress bool    `json:"resilver_in_progress"`
+	TopologySummary    string  `json:"topology_summary"`
 }
 
 type TrueNASVdev struct {
@@ -43,21 +43,18 @@ type TrueNASVdev struct {
 }
 
 type TrueNASDatasetSnapshot struct {
-	Name              string  `json:"name"`
-	Pool              string  `json:"pool"`
-	Type              string  `json:"type"` // FILESYSTEM, VOLUME
-	Used              *int64  `json:"used"`
-	Available         *int64  `json:"available"`
-	Quota             *int64  `json:"quota"`
-	Reservation       *int64  `json:"reservation"`
-	Compression       string  `json:"compression"`
-	Deduplication     string  `json:"deduplication"`
-	MountPoint        string  `json:"mountpoint"`
-	RecordSize        *int64  `json:"record_size"`
-	ATime             string  `json:"atime"`
-	CompressRatio     string  `json:"compress_ratio"`
-	ReadOnly          bool    `json:"read_only"`
-	SnapshotCount     int     `json:"snapshot_count"`
+	Name          string `json:"name"`
+	Pool          string `json:"pool"`
+	Type          string `json:"type"` // filesystem, volume, snapshot
+	UsedBytes     *int64 `json:"used_bytes"`
+	AvailableBytes *int64 `json:"available_bytes"`
+	QuotaBytes    *int64 `json:"quota_bytes"`
+	Compression   string `json:"compression"`
+	Dedup         bool   `json:"dedup"`
+	MountPoint    string `json:"mountpoint"`
+	RecordSize    *int64 `json:"record_size"`
+	ATime         bool   `json:"atime"`
+	SnapshotCount *int   `json:"snapshot_count"`
 }
 
 type TrueNASZFSSnapshotSummary struct {
@@ -69,16 +66,17 @@ type TrueNASZFSSnapshotSummary struct {
 }
 
 type TrueNASReplicationTask struct {
-	ID           int    `json:"id"`
-	Name         string `json:"name"`
-	Direction    string `json:"direction"` // PUSH, PULL
-	Transport    string `json:"transport"` // SSH, LOCAL, LEGACY
+	ID             int      `json:"id"`
+	Name           string   `json:"name"`
+	Direction      string   `json:"direction"` // push, pull
+	Transport      string   `json:"transport"` // SSH, LOCAL, LEGACY
 	SourceDatasets []string `json:"source_datasets"`
 	TargetDataset  string   `json:"target_dataset"`
-	Enabled      bool   `json:"enabled"`
-	State        string `json:"state"`  // RUNNING, WAITING, ERROR, FINISHED
-	LastRun      string `json:"last_run,omitempty"`
-	AutoSnap     bool   `json:"auto_snapshot"`
+	Enabled        bool     `json:"enabled"`
+	State          string   `json:"state"`        // running, waiting, error, finished
+	LastRunAt      string   `json:"last_run_at,omitempty"`
+	LastRunOK      *bool    `json:"last_run_ok"`
+	AutoSnap       bool     `json:"auto_snapshot"`
 }
 
 type TrueNASShareSnapshot struct {
@@ -91,21 +89,22 @@ type TrueNASShareSnapshot struct {
 }
 
 type TrueNASSystemInfo struct {
-	Version     string `json:"version"`
-	Hostname    string `json:"hostname"`
-	Uptime      *int64 `json:"uptime_seconds"`
-	SystemType  string `json:"system_type"` // SCALE or CORE
+	Version    string `json:"version"`
+	Hostname   string `json:"hostname"`
+	Uptime     *int64 `json:"uptime_seconds"`
+	Platform   string `json:"platform"` // SCALE or CORE
+	Serial     string `json:"serial,omitempty"`
 }
 
 type TrueNASSnapshotData struct {
-	System       *TrueNASSystemInfo            `json:"system"`
-	Pools        []TrueNASPoolSnapshot         `json:"pools"`
-	Datasets     []TrueNASDatasetSnapshot      `json:"datasets"`
-	Snapshots    []TrueNASZFSSnapshotSummary   `json:"snapshots"`
-	Replication  []TrueNASReplicationTask       `json:"replication"`
-	Shares       []TrueNASShareSnapshot         `json:"shares"`
-	Alerts       []AlertEntry                   `json:"alerts"`
-	CollectedAt  string                         `json:"collected_at"`
+	System           *TrueNASSystemInfo            `json:"system"`
+	Pools            []TrueNASPoolSnapshot         `json:"pools"`
+	Datasets         []TrueNASDatasetSnapshot      `json:"datasets"`
+	SnapshotTasks    []TrueNASZFSSnapshotSummary   `json:"snapshot_tasks"`
+	ReplicationTasks []TrueNASReplicationTask       `json:"replication_tasks"`
+	Shares           []TrueNASShareSnapshot         `json:"shares"`
+	Alerts           []AlertEntry                   `json:"alerts"`
+	CollectedAt      string                         `json:"collected_at"`
 }
 
 // ── TrueNAS client ──
@@ -213,7 +212,7 @@ func (t *TrueNASClient) CollectSnapshot() (*TrueNASSnapshotData, error) {
 	if err != nil {
 		log.Printf("[truenas] Snapshot summary failed: %v", err)
 	} else {
-		snap.Snapshots = snapshots
+		snap.SnapshotTasks = snapshots
 	}
 
 	// Replication tasks
@@ -221,7 +220,7 @@ func (t *TrueNASClient) CollectSnapshot() (*TrueNASSnapshotData, error) {
 	if err != nil {
 		log.Printf("[truenas] Replication collection failed: %v", err)
 	} else {
-		snap.Replication = repl
+		snap.ReplicationTasks = repl
 	}
 
 	// Shares (SMB + NFS)
@@ -262,16 +261,17 @@ func (t *TrueNASClient) collectSystemInfo() (*TrueNASSystemInfo, error) {
 	sys := &TrueNASSystemInfo{
 		Version:  getString(info, "version"),
 		Hostname: getString(info, "hostname"),
+		Serial:   getString(info, "system_serial"),
 	}
 
 	if v, ok := getInt(info, "uptime_seconds"); ok {
 		sys.Uptime = &v
 	}
-	// Detect SCALE vs CORE
+	// Detect SCALE vs CORE — lowercase to match TS contract
 	if strings.Contains(strings.ToUpper(sys.Version), "SCALE") {
-		sys.SystemType = "SCALE"
+		sys.Platform = "SCALE"
 	} else {
-		sys.SystemType = "CORE"
+		sys.Platform = "CORE"
 	}
 
 	return sys, nil
@@ -292,12 +292,13 @@ func (t *TrueNASClient) collectPools() ([]TrueNASPoolSnapshot, error) {
 	for _, p := range poolsRaw {
 		pool := TrueNASPoolSnapshot{
 			Name:    getString(p, "name"),
-			Status:  getString(p, "status"),
+			Status:  strings.ToLower(getString(p, "status")), // lowercase for TS
 			Healthy: getBool(p, "healthy"),
-			Path:    getString(p, "path"),
+			GUID:    getString(p, "guid"),
 		}
 
-		// Topology info
+		// Topology info — build summary string and track vdevs
+		var vdevs []TrueNASVdev
 		if topo, ok := p["topology"].(map[string]interface{}); ok {
 			if dataVdevs, ok := topo["data"].([]interface{}); ok {
 				for _, dv := range dataVdevs {
@@ -310,41 +311,45 @@ func (t *TrueNASClient) collectPools() ([]TrueNASPoolSnapshot, error) {
 						if children, ok := vd["children"].([]interface{}); ok {
 							vdev.Disks = len(children)
 						}
-						pool.TopologyVdevs = append(pool.TopologyVdevs, vdev)
+						vdevs = append(vdevs, vdev)
 					}
 				}
 			}
 		}
+		// Build topology_summary e.g. "2x MIRROR (4 disks)"
+		pool.TopologySummary = buildTopologySummary(vdevs)
 
-		// Scan info
+		// Scan info → last_scrub_at, last_scrub_errors, resilver_in_progress
 		if scan, ok := p["scan"].(map[string]interface{}); ok {
-			pool.ScanState = getString(scan, "state")
+			scanFunc := getString(scan, "function")
+			scanState := getString(scan, "state")
 			if errs, ok := getInt(scan, "errors"); ok {
-				pool.ScanErrors = &errs
+				pool.LastScrubErrors = &errs
+			}
+			if scanFunc == "SCRUB" && scanState == "FINISHED" {
+				if endTime := getString(scan, "end_time"); endTime != "" {
+					pool.LastScrubAt = endTime
+				}
+			}
+			if scanFunc == "RESILVER" && scanState == "SCANNING" {
+				pool.ResilverInProgress = true
 			}
 		}
 
-		pool.ReadOnly = getBool(p, "is_decrypted") && getString(p, "status") == "ONLINE"
-
-		// Size info — try parsing nested values
+		// Size info
 		if sizeVal, ok := p["size"]; ok {
 			if size, ok := toInt64(sizeVal); ok {
-				pool.Size = &size
+				pool.CapacityBytes = &size
 			}
 		}
 		if allocVal, ok := p["allocated"]; ok {
 			if alloc, ok := toInt64(allocVal); ok {
-				pool.Allocated = &alloc
-			}
-		}
-		if freeVal, ok := p["free"]; ok {
-			if free, ok := toInt64(freeVal); ok {
-				pool.Free = &free
+				pool.UsedBytes = &alloc
 			}
 		}
 		if fragVal, ok := p["fragmentation"]; ok {
 			if frag, ok := toInt64(fragVal); ok {
-				pool.Fragmentation = &frag
+				pool.FragmentationPct = &frag
 			}
 		}
 
@@ -352,6 +357,33 @@ func (t *TrueNASClient) collectPools() ([]TrueNASPoolSnapshot, error) {
 	}
 
 	return pools, nil
+}
+
+// buildTopologySummary creates a human-readable summary like "2x MIRROR (4 disks)"
+func buildTopologySummary(vdevs []TrueNASVdev) string {
+	if len(vdevs) == 0 {
+		return ""
+	}
+	// Group by type
+	typeCounts := map[string]int{}
+	totalDisks := 0
+	for _, v := range vdevs {
+		typeCounts[strings.ToUpper(v.Type)]++
+		totalDisks += v.Disks
+	}
+	var parts []string
+	for vtype, count := range typeCounts {
+		if count > 1 {
+			parts = append(parts, fmt.Sprintf("%dx %s", count, vtype))
+		} else {
+			parts = append(parts, vtype)
+		}
+	}
+	summary := strings.Join(parts, " + ")
+	if totalDisks > 0 {
+		summary += fmt.Sprintf(" (%d disks)", totalDisks)
+	}
+	return summary
 }
 
 func (t *TrueNASClient) collectDatasets() ([]TrueNASDatasetSnapshot, error) {
@@ -370,25 +402,24 @@ func (t *TrueNASClient) collectDatasets() ([]TrueNASDatasetSnapshot, error) {
 		ds := TrueNASDatasetSnapshot{
 			Name:       getString(d, "name"),
 			Pool:       getString(d, "pool"),
-			Type:       getString(d, "type"),
+			Type:       strings.ToLower(getString(d, "type")), // lowercase for TS
 			MountPoint: getString(d, "mountpoint"),
 		}
 
 		// TrueNAS returns nested property objects like {"value": "...", "rawvalue": "..."}
-		ds.Used = getNestedInt(d, "used")
-		ds.Available = getNestedInt(d, "available")
-		ds.Quota = getNestedInt(d, "quota")
-		ds.Reservation = getNestedInt(d, "reservation")
+		ds.UsedBytes = getNestedInt(d, "used")
+		ds.AvailableBytes = getNestedInt(d, "available")
+		ds.QuotaBytes = getNestedInt(d, "quota")
 		ds.RecordSize = getNestedInt(d, "recordsize")
 
 		ds.Compression = getNestedString(d, "compression")
-		ds.Deduplication = getNestedString(d, "dedup")
-		ds.ATime = getNestedString(d, "atime")
-		ds.CompressRatio = getNestedString(d, "compressratio")
 
-		if roVal := getNestedString(d, "readonly"); roVal == "ON" {
-			ds.ReadOnly = true
-		}
+		// Convert dedup and atime strings to booleans
+		dedupVal := getNestedString(d, "dedup")
+		ds.Dedup = strings.EqualFold(dedupVal, "ON")
+
+		atimeVal := getNestedString(d, "atime")
+		ds.ATime = strings.EqualFold(atimeVal, "ON")
 
 		datasets = append(datasets, ds)
 	}
@@ -472,7 +503,7 @@ func (t *TrueNASClient) collectReplication() ([]TrueNASReplicationTask, error) {
 	for _, r := range replRaw {
 		task := TrueNASReplicationTask{
 			Name:      getString(r, "name"),
-			Direction: getString(r, "direction"),
+			Direction: strings.ToLower(getString(r, "direction")), // lowercase for TS
 			Transport: getString(r, "transport"),
 			Enabled:   getBool(r, "enabled"),
 			AutoSnap:  getBool(r, "auto"),
@@ -493,12 +524,18 @@ func (t *TrueNASClient) collectReplication() ([]TrueNASReplicationTask, error) {
 
 		// Job state
 		if job, ok := r["job"].(map[string]interface{}); ok {
-			task.State = getString(job, "state")
+			task.State = strings.ToLower(getString(job, "state")) // lowercase for TS
 			if ts := getString(job, "time_finished"); ts != "" {
-				task.LastRun = ts
+				task.LastRunAt = ts
+			}
+			// Derive last_run_ok from job state
+			jobState := getString(job, "state")
+			if jobState != "" {
+				ok := strings.EqualFold(jobState, "SUCCESS") || strings.EqualFold(jobState, "FINISHED")
+				task.LastRunOK = &ok
 			}
 		} else {
-			task.State = "IDLE"
+			task.State = "idle"
 		}
 
 		tasks = append(tasks, task)
@@ -618,8 +655,8 @@ func (t *TrueNASClient) generateAlerts(snap *TrueNASSnapshotData) []AlertEntry {
 	var alerts []AlertEntry
 
 	for _, pool := range snap.Pools {
-		// Pool health
-		if pool.Status != "ONLINE" {
+		// Pool health — compare lowercase values
+		if pool.Status != "online" {
 			alerts = append(alerts, AlertEntry{
 				Severity: "error", Source: "health",
 				Message: fmt.Sprintf("Pool %s is %s", pool.Name, pool.Status),
@@ -635,8 +672,8 @@ func (t *TrueNASClient) generateAlerts(snap *TrueNASSnapshotData) []AlertEntry {
 		}
 
 		// Capacity thresholds
-		if pool.Size != nil && pool.Allocated != nil && *pool.Size > 0 {
-			pct := float64(*pool.Allocated) / float64(*pool.Size)
+		if pool.CapacityBytes != nil && pool.UsedBytes != nil && *pool.CapacityBytes > 0 {
+			pct := float64(*pool.UsedBytes) / float64(*pool.CapacityBytes)
 			if pct > 0.90 {
 				alerts = append(alerts, AlertEntry{
 					Severity: "error", Source: "storage",
@@ -653,31 +690,31 @@ func (t *TrueNASClient) generateAlerts(snap *TrueNASSnapshotData) []AlertEntry {
 		}
 
 		// Fragmentation
-		if pool.Fragmentation != nil && *pool.Fragmentation > 50 {
+		if pool.FragmentationPct != nil && *pool.FragmentationPct > 50 {
 			sev := "warning"
-			if *pool.Fragmentation > 75 {
+			if *pool.FragmentationPct > 75 {
 				sev = "error"
 			}
 			alerts = append(alerts, AlertEntry{
 				Severity: sev, Source: "storage",
-				Message: fmt.Sprintf("Pool %s fragmentation: %d%%", pool.Name, *pool.Fragmentation),
+				Message: fmt.Sprintf("Pool %s fragmentation: %d%%", pool.Name, *pool.FragmentationPct),
 				Field:   "pool.fragmentation",
 			})
 		}
 
 		// Scan errors
-		if pool.ScanErrors != nil && *pool.ScanErrors > 0 {
+		if pool.LastScrubErrors != nil && *pool.LastScrubErrors > 0 {
 			alerts = append(alerts, AlertEntry{
 				Severity: "error", Source: "storage",
-				Message: fmt.Sprintf("Pool %s has %d scan errors", pool.Name, *pool.ScanErrors),
+				Message: fmt.Sprintf("Pool %s has %d scan errors", pool.Name, *pool.LastScrubErrors),
 				Field:   "pool.scan_errors",
 			})
 		}
 	}
 
-	// Replication errors
-	for _, task := range snap.Replication {
-		if task.State == "ERROR" && task.Enabled {
+	// Replication errors — compare lowercase
+	for _, task := range snap.ReplicationTasks {
+		if task.State == "error" && task.Enabled {
 			alerts = append(alerts, AlertEntry{
 				Severity: "error", Source: "replication",
 				Message: fmt.Sprintf("Replication task '%s' in error state", task.Name),

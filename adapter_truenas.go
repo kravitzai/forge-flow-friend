@@ -49,7 +49,7 @@ func (a *TrueNASAdapter) Init(profile *TargetProfile, creds map[string]string) e
 		return fmt.Errorf("API access verification failed: %w", err)
 	}
 	log.Printf("[truenas:%s] Connected to %s (%s) — %s",
-		profile.Name, sysInfo.Hostname, sysInfo.SystemType, sysInfo.Version)
+		profile.Name, sysInfo.Hostname, sysInfo.Platform, sysInfo.Version)
 
 	return nil
 }
@@ -63,12 +63,12 @@ func (a *TrueNASAdapter) Collect() (map[string]interface{}, error) {
 	return map[string]interface{}{
 		"capabilities": a.Capabilities(),
 		"snapshotData": map[string]interface{}{
-			"system":      snapshot.System,
-			"pools":       snapshot.Pools,
-			"datasets":    snapshot.Datasets,
-			"snapshots":   snapshot.Snapshots,
-			"replication": snapshot.Replication,
-			"shares":      snapshot.Shares,
+			"system":            snapshot.System,
+			"pools":             snapshot.Pools,
+			"datasets":          snapshot.Datasets,
+			"snapshot_tasks":    snapshot.SnapshotTasks,
+			"replication_tasks": snapshot.ReplicationTasks,
+			"shares":            snapshot.Shares,
 		},
 		"alerts":      snapshot.Alerts,
 		"collectedAt": snapshot.CollectedAt,
