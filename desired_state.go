@@ -111,8 +111,10 @@ type SyncManager struct {
 	fastInterval time.Duration
 	cancel       context.CancelFunc
 	done         chan struct{}
-	fastPollUntil time.Time
-	lastRejected []RejectedProfile
+	fastPollUntil    time.Time
+	lastRejected     []RejectedProfile
+	lastStatusPushAt time.Time
+	statusPushInterval time.Duration
 }
 
 func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor, changePolicy ChangePolicyConfig) *SyncManager {
@@ -125,15 +127,16 @@ func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor
 	}
 
 	return &SyncManager{
-		backend:      backend,
-		store:        store,
-		supervisor:   supervisor,
-		validator:    NewProfileValidator(),
-		hostKeyPair:  kp,
-		relayHandler: NewRelayHandler(supervisor, backend, store, changePolicy),
-		interval:     60 * time.Second,
-		fastInterval: 5 * time.Second,
-		done:         make(chan struct{}),
+		backend:            backend,
+		store:              store,
+		supervisor:         supervisor,
+		validator:          NewProfileValidator(),
+		hostKeyPair:        kp,
+		relayHandler:       NewRelayHandler(supervisor, backend, store, changePolicy),
+		interval:           60 * time.Second,
+		fastInterval:       5 * time.Second,
+		statusPushInterval: 2 * time.Minute,
+		done:               make(chan struct{}),
 	}
 }
 
@@ -250,6 +253,9 @@ func (sm *SyncManager) fetchAndReconcile() {
 
 	if payload == nil {
 		audit.Debug("sync.reconciled", "Empty desired-state — no changes")
+		// Even with no config changes, periodically push all target statuses
+		// so the backend clears stale failed/error rows after recovery.
+		sm.maybeStatusPush()
 		return
 	}
 
@@ -488,6 +494,62 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 		state.LastAckStatus = status
 		sm.store.SaveState(state)
 	}
+}
+
+// maybeStatusPush sends a consolidated target-status push to the backend
+// on a cadence (statusPushInterval), even when desired-state returns 204.
+// This ensures recovered targets clear stale failed/error rows promptly.
+func (sm *SyncManager) maybeStatusPush() {
+	if time.Since(sm.lastStatusPushAt) < sm.statusPushInterval {
+		return
+	}
+
+	token := sm.supervisor.GetConnectorToken()
+	if token == "" {
+		return
+	}
+
+	targets := sm.supervisor.GetTargets()
+	if len(targets) == 0 {
+		return
+	}
+
+	targetStatuses := make(map[string]TargetAckStatus)
+	for _, t := range targets {
+		ts := TargetAckStatus{Status: string(t.Status)}
+		if t.Status == TargetStatusError || t.Status == TargetStatusDegraded {
+			for _, ws := range sm.supervisor.Status() {
+				if ws.TargetID == t.TargetID && ws.LastError != "" {
+					ts.Error = ws.LastError
+					break
+				}
+			}
+		}
+		targetStatuses[t.TargetID] = ts
+	}
+
+	// Use last known revision — this is a status-only push, not a config ack
+	state := sm.supervisor.GetState()
+	revision := int64(0)
+	if state != nil {
+		revision = state.LastSyncRevision
+	}
+
+	ack := AckPayload{
+		Revision:       revision,
+		Status:         "applied",
+		AgentVersion:   HostVersion,
+		TargetStatuses: targetStatuses,
+	}
+
+	if err := sm.backend.SendAcknowledgement(token, ack); err != nil {
+		audit.Warn("sync.error", "Status push failed", Err(err))
+		return
+	}
+
+	sm.lastStatusPushAt = time.Now()
+	audit.Info("sync.reconciled", "Periodic status push sent",
+		F("targets", len(targetStatuses)))
 }
 
 func (sm *SyncManager) executeLocalWipe() WipeAckPayload {
