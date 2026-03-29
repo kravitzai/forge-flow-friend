@@ -247,6 +247,8 @@ func (w *Worker) collect() {
 		w.mu.Unlock()
 		w.notifyStateChange(WorkerStatusRunning)
 		audit.Info("worker.recovered", "Recovered from degraded state", w.targetFields()...)
+		// Immediate heartbeat on recovery so backend sees healthy status quickly
+		w.sendHeartbeat()
 	} else {
 		w.mu.Unlock()
 	}

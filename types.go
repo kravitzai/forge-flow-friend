@@ -182,7 +182,7 @@ func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{
 		MaxConsecutiveErrors: 5,
 		InitialBackoff:       10 * time.Second,
-		MaxBackoff:           5 * time.Minute,
+		MaxBackoff:           60 * time.Second, // Cap at 60s for faster recovery after outages
 		BackoffMultiplier:    2.0,
 		FailedAfterErrors:    20,
 	}

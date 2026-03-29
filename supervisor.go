@@ -177,15 +177,15 @@ func (s *Supervisor) Reconcile() error {
 				existing.Stop()
 				delete(s.workers, target.TargetID)
 
-				// Calculate next retry backoff: 60s, 120s, 240s, capped at 5min
+			// Calculate next retry backoff: 30s, 60s, capped at 60s
 				retryCount := s.failedRetries[target.TargetID] + 1
 				s.failedRetries[target.TargetID] = retryCount
-				backoff := time.Duration(60) * time.Second
-				for i := 1; i < retryCount && backoff < 5*time.Minute; i++ {
+				backoff := time.Duration(30) * time.Second
+				for i := 1; i < retryCount && backoff < 60*time.Second; i++ {
 					backoff *= 2
 				}
-				if backoff > 5*time.Minute {
-					backoff = 5 * time.Minute
+				if backoff > 60*time.Second {
+					backoff = 60 * time.Second
 				}
 				s.failedRetryAt[target.TargetID] = time.Now().Add(backoff)
 				// Fall through to Case 4 to start a fresh worker
@@ -285,11 +285,14 @@ func (s *Supervisor) onWorkerStateChange(targetID string, status WorkerStatus) {
 
 		for i := range s.state.Targets {
 			if s.state.Targets[i].TargetID == targetID {
-				switch status {
+			switch status {
 				case WorkerStatusDegraded:
 					s.state.Targets[i].Status = TargetStatusDegraded
 				case WorkerStatusRunning:
 					s.state.Targets[i].Status = TargetStatusActive
+					// Clear retry tracking on recovery
+					delete(s.failedRetryAt, targetID)
+					delete(s.failedRetries, targetID)
 				case WorkerStatusStopped:
 					s.state.Targets[i].Status = TargetStatusPaused
 				case WorkerStatusFailed:
