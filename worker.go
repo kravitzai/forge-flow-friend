@@ -237,20 +237,29 @@ func (w *Worker) collect() {
 		collectDuration, payloadBytes, collectionStatus, subCalls,
 	)
 
-	// Reset error state on success
+	// Reset error state on success — clear the full failure envelope
 	w.mu.Lock()
+	prevStatus := w.state.Status
+	hadError := w.state.LastError != ""
 	w.state.ConsecutiveErrors = 0
+	w.state.LastError = ""
+	w.state.LastErrorAt = time.Time{}
 	w.state.LastCollectionAt = time.Now()
 	w.state.TotalCollections++
-	if w.state.Status == WorkerStatusDegraded {
+	if prevStatus == WorkerStatusDegraded || prevStatus == WorkerStatusFailed {
 		w.state.Status = WorkerStatusRunning
 		w.mu.Unlock()
 		w.notifyStateChange(WorkerStatusRunning)
-		audit.Info("worker.recovered", "Recovered from degraded state", w.targetFields()...)
+		audit.Info("worker.recovered", "Recovered from degraded/failed state — stale error cleared",
+			append(w.targetFields(), F("prev_status", string(prevStatus)))...)
 		// Immediate heartbeat on recovery so backend sees healthy status quickly
 		w.sendHeartbeat()
 	} else {
 		w.mu.Unlock()
+		if hadError {
+			audit.Debug("worker.recovery", "Cleared stale error after successful collection",
+				w.targetFields()...)
+		}
 	}
 
 	if collectionStatus == "partial" {
@@ -359,6 +368,12 @@ func (w *Worker) sendHeartbeat() {
 	lastErr := w.state.LastError
 	consecutiveErrors := w.state.ConsecutiveErrors
 	w.mu.RUnlock()
+
+	// HARD RULE: never include stale error text for healthy workers
+	if workerStatus == string(WorkerStatusRunning) || workerStatus == string(WorkerStatusIdle) {
+		lastErr = ""
+		consecutiveErrors = 0
+	}
 
 	payload := map[string]interface{}{
 		"type":              "heartbeat",

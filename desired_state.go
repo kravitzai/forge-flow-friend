@@ -451,10 +451,13 @@ func (sm *SyncManager) sendAck(revision int64, status string) {
 	}
 
 	targetStatuses := make(map[string]TargetAckStatus)
+	workerStates := sm.supervisor.Status()
 	for _, t := range sm.supervisor.GetTargets() {
 		ts := TargetAckStatus{Status: string(t.Status)}
+		// HARD RULE: only include error text for non-healthy states.
+		// Active/running targets must never carry stale error strings.
 		if t.Status == TargetStatusError || t.Status == TargetStatusDegraded {
-			for _, ws := range sm.supervisor.Status() {
+			for _, ws := range workerStates {
 				if ws.TargetID == t.TargetID && ws.LastError != "" {
 					ts.Error = ws.LastError
 					break
@@ -515,10 +518,13 @@ func (sm *SyncManager) maybeStatusPush() {
 	}
 
 	targetStatuses := make(map[string]TargetAckStatus)
+	workerStates := sm.supervisor.Status()
 	for _, t := range targets {
 		ts := TargetAckStatus{Status: string(t.Status)}
+		// HARD RULE: only include error text for non-healthy states.
+		// Active/running targets must never carry stale error strings.
 		if t.Status == TargetStatusError || t.Status == TargetStatusDegraded {
-			for _, ws := range sm.supervisor.Status() {
+			for _, ws := range workerStates {
 				if ws.TargetID == t.TargetID && ws.LastError != "" {
 					ts.Error = ws.LastError
 					break
@@ -548,6 +554,13 @@ func (sm *SyncManager) maybeStatusPush() {
 	}
 
 	sm.lastStatusPushAt = time.Now()
+
+	// Log status payload at debug level for recovery diagnostics
+	for tid, ts := range targetStatuses {
+		audit.Debug("sync.status_push", "Target status in push",
+			F("target_id", tid), F("status", ts.Status), F("has_error", ts.Error != ""))
+	}
+
 	audit.Info("sync.reconciled", "Periodic status push sent",
 		F("targets", len(targetStatuses)))
 }
