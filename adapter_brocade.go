@@ -8,10 +8,13 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -49,9 +52,21 @@ func (a *BrocadeAdapter) Init(profile *TargetProfile, creds map[string]string) e
 	log.Printf("[brocade:%s] Verifying FOS REST API at %s...", profile.Name, a.baseURL)
 	_, err := a.brocadeGet("/rest/running/brocade-chassis/chassis")
 	if err != nil {
+		// If HTTPS fails with connection refused, try HTTP fallback
+		if strings.HasPrefix(a.baseURL, "https://") && isConnRefused(err) {
+			httpURL := "http://" + strings.TrimPrefix(a.baseURL, "https://")
+			log.Printf("[brocade:%s] HTTPS connection refused, trying HTTP fallback at %s...", profile.Name, httpURL)
+			a.baseURL = httpURL
+			_, err2 := a.brocadeGet("/rest/running/brocade-chassis/chassis")
+			if err2 != nil {
+				return fmt.Errorf("Brocade FOS REST verification failed (tried HTTPS and HTTP): %w", err2)
+			}
+			log.Printf("[brocade:%s] Connected via HTTP (no TLS)", profile.Name)
+			return nil
+		}
 		return fmt.Errorf("Brocade FOS REST verification failed: %w", err)
 	}
-	log.Printf("[brocade:%s] Connected", profile.Name)
+	log.Printf("[brocade:%s] Connected via HTTPS", profile.Name)
 	return nil
 }
 
@@ -201,4 +216,16 @@ func brocadeExtractArray(resp map[string]interface{}, key string) []interface{} 
 		}
 	}
 	return nil
+}
+
+// isConnRefused checks if an error is a TCP connection refused.
+func isConnRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) {
+		return opErr.Op == "dial" && strings.Contains(opErr.Err.Error(), "connection refused")
+	}
+	return strings.Contains(err.Error(), "connection refused")
 }
