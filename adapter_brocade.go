@@ -131,29 +131,45 @@ func normalizeBrocadeSnapshot(
 	out := map[string]interface{}{}
 
 	// ── Switch identity ──
-	if sw := brocadeExtractObject(switchInfo, "fibrechannel-switch"); sw != nil {
-		out["switchName"] = sw["name"]
-		out["switchWwn"] = sw["switch-wwn"]
-		out["switchRole"] = sw["switch-role"]
-		out["domainId"] = sw["domain-id"]
-		out["firmwareVersion"] = sw["firmware-version"]
-		out["model"] = sw["model"]
-		// switch-state: 2=online, others not
-		if st, ok := sw["switch-state"].(float64); ok {
+	if sw := brocadeExtractFirst(switchInfo, "fibrechannel-switch"); sw != nil {
+		if v := brocadeStr(sw, "name", "switch-name", "user-friendly-name"); v != "" {
+			out["switchName"] = v
+		}
+		if v := brocadeStr(sw, "switch-wwn", "wwn"); v != "" {
+			out["switchWwn"] = v
+		}
+		if v := brocadeStr(sw, "switch-role"); v != "" {
+			out["switchRole"] = v
+		}
+		out["domainId"] = brocadeNum(sw, "domain-id")
+		if v := brocadeStr(sw, "firmware-version", "firmware-Version", "fw-version"); v != "" {
+			out["firmwareVersion"] = v
+		}
+		if v := brocadeStr(sw, "model"); v != "" {
+			out["model"] = v
+		}
+		// switch-state: 2=online, others not; also accept string values
+		if st := brocadeNum(sw, "switch-state"); st != 0 {
 			if int(st) == 2 {
 				out["switchState"] = "Online"
 			} else {
 				out["switchState"] = fmt.Sprintf("state-%d", int(st))
 			}
+		} else if sv := brocadeStr(sw, "switch-state"); sv != "" {
+			out["switchState"] = sv
 		}
 	}
 
 	// ── Chassis info ──
-	if ch := brocadeExtractObject(chassis, "chassis"); ch != nil {
+	if ch := brocadeExtractFirst(chassis, "chassis"); ch != nil {
 		if out["model"] == nil {
-			out["model"] = ch["product-name"]
+			if v := brocadeStr(ch, "product-name"); v != "" {
+				out["model"] = v
+			}
 		}
-		out["serialNumber"] = ch["serial-number"]
+		if v := brocadeStr(ch, "serial-number"); v != "" {
+			out["serialNumber"] = v
+		}
 		out["chassisName"] = ch["chassis-user-friendly-name"]
 		out["productName"] = ch["product-name"]
 	}
@@ -168,7 +184,7 @@ func normalizeBrocadeSnapshot(
 		if pm == nil {
 			continue
 		}
-		opSt, _ := pm["operational-status"].(float64)
+		opSt := brocadeNum(pm, "operational-status")
 		switch int(opSt) {
 		case 2:
 			portsOnline++
@@ -179,22 +195,20 @@ func normalizeBrocadeSnapshot(
 		default:
 			portsOffline++
 		}
-		// is-enabled-state: 2=enabled, 6=disabled
-		if en, ok := pm["is-enabled-state"].(float64); ok {
-			if int(en) == 6 {
-				portsDisabled++
-			} else if int(en) == 2 {
-				licensedPorts++
-			}
+		// is-enabled-state: 2=enabled (licensed), 6=disabled
+		en := brocadeNum(pm, "is-enabled-state")
+		if int(en) == 6 {
+			portsDisabled++
+		} else if int(en) == 2 {
+			licensedPorts++
 		}
 		// port-type: 7=E-Port, 10/17=F-Port
-		if pt, ok := pm["port-type"].(float64); ok {
-			switch int(pt) {
-			case 7:
-				ePort++
-			case 10, 17:
-				fPort++
-			}
+		pt := brocadeNum(pm, "port-type")
+		switch int(pt) {
+		case 7:
+			ePort++
+		case 10, 17:
+			fPort++
 		}
 	}
 
@@ -238,7 +252,7 @@ func normalizeBrocadeSnapshot(
 	out["fabricSwitchCount"] = len(fabricSwitches)
 
 	// ── Zoning ──
-	if ec := brocadeExtractObject(zoneConfig, "effective-configuration"); ec != nil {
+	if ec := brocadeExtractFirst(zoneConfig, "effective-configuration"); ec != nil {
 		out["zoningActiveCfg"] = ec["cfg-name"]
 		if zones, ok := ec["zone"].([]interface{}); ok {
 			out["zoneCount"] = len(zones)
@@ -326,20 +340,73 @@ func brocadeExtractArray(resp map[string]interface{}, key string) []interface{} 
 	return nil
 }
 
-// brocadeExtractObject extracts a single object from Brocade's nested Response envelope.
-func brocadeExtractObject(resp map[string]interface{}, key string) map[string]interface{} {
+// brocadeExtractFirst extracts a single object from Brocade's nested Response envelope.
+// Handles both direct object and single-element array forms (FOS version variance).
+func brocadeExtractFirst(resp map[string]interface{}, key string) map[string]interface{} {
 	if resp == nil {
 		return nil
 	}
+	// Direct object
 	if obj, ok := resp[key].(map[string]interface{}); ok {
 		return obj
 	}
+	// Array form — unwrap first element
+	if arr, ok := resp[key].([]interface{}); ok && len(arr) > 0 {
+		if obj, ok := arr[0].(map[string]interface{}); ok {
+			return obj
+		}
+	}
+	// Nested under Response
 	if r, ok := resp["Response"].(map[string]interface{}); ok {
 		if obj, ok := r[key].(map[string]interface{}); ok {
 			return obj
 		}
+		if arr, ok := r[key].([]interface{}); ok && len(arr) > 0 {
+			if obj, ok := arr[0].(map[string]interface{}); ok {
+				return obj
+			}
+		}
 	}
 	return nil
+}
+
+// brocadeStr extracts a string value trying multiple key variants.
+func brocadeStr(m map[string]interface{}, keys ...string) string {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch tv := v.(type) {
+			case string:
+				return tv
+			case float64:
+				return fmt.Sprintf("%v", tv)
+			}
+		}
+	}
+	return ""
+}
+
+// brocadeNum extracts a numeric value from various types (float64, bool, string).
+func brocadeNum(m map[string]interface{}, keys ...string) float64 {
+	for _, k := range keys {
+		if v, ok := m[k]; ok {
+			switch tv := v.(type) {
+			case float64:
+				return tv
+			case bool:
+				if tv {
+					return 1
+				}
+				return 0
+			case string:
+				// Try numeric parse
+				var f float64
+				if _, err := fmt.Sscanf(tv, "%f", &f); err == nil {
+					return f
+				}
+			}
+		}
+	}
+	return 0
 }
 
 // isConnRefused checks if an error is a TCP connection refused.
