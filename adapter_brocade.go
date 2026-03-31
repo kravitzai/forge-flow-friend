@@ -138,33 +138,64 @@ func normalizeBrocadeSnapshot(
 		if v := brocadeStr(sw, "switch-wwn", "wwn"); v != "" {
 			out["switchWwn"] = v
 		}
-		if v := brocadeStr(sw, "switch-role"); v != "" {
-			out["switchRole"] = v
+	// switch-role: numeric enum 0=subordinate,1=disabled,2=principal; also accept string
+		if roleNum := brocadeNum(sw, "switch-role"); roleNum > 0 || brocadeStr(sw, "switch-role") != "" {
+			switch int(roleNum) {
+			case 0:
+				out["switchRole"] = "Subordinate"
+			case 1:
+				out["switchRole"] = "Disabled"
+			case 2:
+				out["switchRole"] = "Principal"
+			default:
+				if sv := brocadeStr(sw, "switch-role"); sv != "" {
+					out["switchRole"] = sv
+				} else {
+					out["switchRole"] = fmt.Sprintf("role-%d", int(roleNum))
+				}
+			}
 		}
 		out["domainId"] = brocadeNum(sw, "domain-id")
 		if v := brocadeStr(sw, "firmware-version", "firmware-Version", "fw-version"); v != "" {
 			out["firmwareVersion"] = v
 		}
+	// model: fibrechannel-switch may return a numeric product ID (e.g. 109.1);
+		// prefer chassis product-name, so only use this as a last resort
 		if v := brocadeStr(sw, "model"); v != "" {
-			out["model"] = v
+			out["_switchModelRaw"] = v
 		}
-		// switch-state: 2=online, others not; also accept string values
-		if st := brocadeNum(sw, "switch-state"); st != 0 {
-			if int(st) == 2 {
+	// switch-state: 0=undefined,1=offline,2=online,3=testing,4=faulty; also accept string
+		if _, hasState := sw["switch-state"]; hasState {
+			st := brocadeNum(sw, "switch-state")
+			switch int(st) {
+			case 2:
 				out["switchState"] = "Online"
-			} else {
-				out["switchState"] = fmt.Sprintf("state-%d", int(st))
+			case 1:
+				out["switchState"] = "Offline"
+			case 3:
+				out["switchState"] = "Testing"
+			case 4:
+				out["switchState"] = "Faulty"
+			default:
+				if sv := brocadeStr(sw, "switch-state"); sv != "" && sv != "0" {
+					out["switchState"] = sv
+				} else {
+					out["switchState"] = "Unknown"
+				}
 			}
-		} else if sv := brocadeStr(sw, "switch-state"); sv != "" {
-			out["switchState"] = sv
 		}
 	}
 
 	// ── Chassis info ──
 	if ch := brocadeExtractFirst(chassis, "chassis"); ch != nil {
-		if out["model"] == nil {
-			if v := brocadeStr(ch, "product-name"); v != "" {
-				out["model"] = v
+	// Always prefer chassis product-name for human-readable model
+		if v := brocadeStr(ch, "product-name"); v != "" {
+			out["model"] = v
+		}
+		// Fallback to switch-level model only if chassis didn't provide one
+		if out["model"] == nil || out["model"] == "" {
+			if raw, ok := out["_switchModelRaw"]; ok {
+				out["model"] = raw
 			}
 		}
 		if v := brocadeStr(ch, "serial-number"); v != "" {
