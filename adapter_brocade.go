@@ -162,6 +162,7 @@ func normalizeBrocadeSnapshot(
 	portItems := brocadeExtractArray(ports, "fibrechannel")
 	portsOnline, portsOffline, portsFaulty, portsDisabled := 0, 0, 0, 0
 	fPort, ePort := 0, 0
+	licensedPorts := 0
 	for _, p := range portItems {
 		pm, _ := p.(map[string]interface{})
 		if pm == nil {
@@ -179,8 +180,12 @@ func normalizeBrocadeSnapshot(
 			portsOffline++
 		}
 		// is-enabled-state: 2=enabled, 6=disabled
-		if en, ok := pm["is-enabled-state"].(float64); ok && int(en) == 6 {
-			portsDisabled++
+		if en, ok := pm["is-enabled-state"].(float64); ok {
+			if int(en) == 6 {
+				portsDisabled++
+			} else if int(en) == 2 {
+				licensedPorts++
+			}
 		}
 		// port-type: 7=E-Port, 10/17=F-Port
 		if pt, ok := pm["port-type"].(float64); ok {
@@ -192,14 +197,21 @@ func normalizeBrocadeSnapshot(
 			}
 		}
 	}
+
+	// Count SFPs inserted from media endpoint
+	mediaItems := brocadeExtractArray(media, "media-rdp")
+	sfpInserted := len(mediaItems)
+
 	out["ports"] = map[string]interface{}{
-		"total":    len(portItems),
-		"online":   portsOnline,
-		"offline":  portsOffline,
-		"faulty":   portsFaulty,
-		"disabled": portsDisabled,
-		"fPort":    fPort,
-		"ePort":    ePort,
+		"total":       len(portItems),
+		"online":      portsOnline,
+		"offline":     portsOffline,
+		"faulty":      portsFaulty,
+		"disabled":    portsDisabled,
+		"fPort":       fPort,
+		"ePort":       ePort,
+		"licensed":    licensedPorts,
+		"sfpInserted": sfpInserted,
 	}
 	// Top-level convenience fields for signal rules
 	out["portTotal"] = len(portItems)
@@ -208,7 +220,6 @@ func normalizeBrocadeSnapshot(
 	out["portsFaulty"] = portsFaulty
 
 	// ── SFP / Media warnings ──
-	mediaItems := brocadeExtractArray(media, "media-rdp")
 	sfpWarnings := 0
 	for _, m := range mediaItems {
 		mm, _ := m.(map[string]interface{})
