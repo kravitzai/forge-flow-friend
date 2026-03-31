@@ -80,63 +80,16 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	zoneConfig, _ := a.brocadeGet("/rest/running/brocade-zone/effective-configuration")
 	fabricInfo, _ := a.brocadeGet("/rest/running/brocade-fabric/fabric-switch")
 
-	// Extract port summary
-	portItems := brocadeExtractArray(ports, "fibrechannel")
-	portsOnline, portsOffline, portsFaulty := 0, 0, 0
-	for _, p := range portItems {
-		pm, _ := p.(map[string]interface{})
-		if pm == nil {
-			continue
-		}
-		// operational-status: 2=online, 3=offline, 5=faulty
-		opSt, _ := pm["operational-status"].(float64)
-		switch int(opSt) {
-		case 2:
-			portsOnline++
-		case 3:
-			portsOffline++
-		case 5:
-			portsFaulty++
-		default:
-			portsOffline++
-		}
-	}
+	snapshotData := normalizeBrocadeSnapshot(chassis, switchInfo, ports, media, zoneConfig, fabricInfo)
 
+	// Build alerts from normalized data
 	var alerts []map[string]interface{}
-	if portsFaulty > 0 {
+	if pf, _ := snapshotData["portsFaulty"].(int); pf > 0 {
 		alerts = append(alerts, map[string]interface{}{
 			"severity": "critical",
 			"source":   "brocade",
-			"message":  fmt.Sprintf("%d port(s) in faulty state", portsFaulty),
+			"message":  fmt.Sprintf("%d port(s) in faulty state", pf),
 		})
-	}
-
-	summary := map[string]interface{}{
-		"portTotal":    len(portItems),
-		"portsOnline":  portsOnline,
-		"portsOffline": portsOffline,
-		"portsFaulty":  portsFaulty,
-	}
-
-	// Extract chassis info
-	if chassis != nil {
-		if ch, ok := chassis["Response"].(map[string]interface{}); ok {
-			if c, ok := ch["chassis"].(map[string]interface{}); ok {
-				summary["chassisName"] = c["chassis-user-friendly-name"]
-				summary["serialNumber"] = c["serial-number"]
-				summary["productName"] = c["product-name"]
-			}
-		}
-	}
-
-	snapshotData := map[string]interface{}{
-		"chassis":    chassis,
-		"switchInfo": switchInfo,
-		"ports":      ports,
-		"media":      media,
-		"zoneConfig": zoneConfig,
-		"fabric":     fabricInfo,
-		"summary":    summary,
 	}
 
 	return map[string]interface{}{
@@ -149,6 +102,7 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 
 func (a *BrocadeAdapter) Capabilities() []string {
 	return []string{
+		"brocade.read.health",
 		"brocade.read.chassis",
 		"brocade.read.ports",
 		"brocade.read.media",
@@ -166,6 +120,151 @@ func (a *BrocadeAdapter) Close() error {
 	a.client = nil
 	return nil
 }
+
+// ── Normalization ──────────────────────────────────────────────────────
+
+// normalizeBrocadeSnapshot flattens raw FOS REST responses into
+// dashboard-ready fields expected by the frontend hook.
+func normalizeBrocadeSnapshot(
+	chassis, switchInfo, ports, media, zoneConfig, fabricInfo map[string]interface{},
+) map[string]interface{} {
+	out := map[string]interface{}{}
+
+	// ── Switch identity ──
+	if sw := brocadeExtractObject(switchInfo, "fibrechannel-switch"); sw != nil {
+		out["switchName"] = sw["name"]
+		out["switchWwn"] = sw["switch-wwn"]
+		out["switchRole"] = sw["switch-role"]
+		out["domainId"] = sw["domain-id"]
+		out["firmwareVersion"] = sw["firmware-version"]
+		out["model"] = sw["model"]
+		// switch-state: 2=online, others not
+		if st, ok := sw["switch-state"].(float64); ok {
+			if int(st) == 2 {
+				out["switchState"] = "Online"
+			} else {
+				out["switchState"] = fmt.Sprintf("state-%d", int(st))
+			}
+		}
+	}
+
+	// ── Chassis info ──
+	if ch := brocadeExtractObject(chassis, "chassis"); ch != nil {
+		if out["model"] == nil {
+			out["model"] = ch["product-name"]
+		}
+		out["serialNumber"] = ch["serial-number"]
+		out["chassisName"] = ch["chassis-user-friendly-name"]
+		out["productName"] = ch["product-name"]
+	}
+
+	// ── Port summary ──
+	portItems := brocadeExtractArray(ports, "fibrechannel")
+	portsOnline, portsOffline, portsFaulty, portsDisabled := 0, 0, 0, 0
+	fPort, ePort := 0, 0
+	for _, p := range portItems {
+		pm, _ := p.(map[string]interface{})
+		if pm == nil {
+			continue
+		}
+		opSt, _ := pm["operational-status"].(float64)
+		switch int(opSt) {
+		case 2:
+			portsOnline++
+		case 3:
+			portsOffline++
+		case 5:
+			portsFaulty++
+		default:
+			portsOffline++
+		}
+		// is-enabled-state: 2=enabled, 6=disabled
+		if en, ok := pm["is-enabled-state"].(float64); ok && int(en) == 6 {
+			portsDisabled++
+		}
+		// port-type: 7=E-Port, 10/17=F-Port
+		if pt, ok := pm["port-type"].(float64); ok {
+			switch int(pt) {
+			case 7:
+				ePort++
+			case 10, 17:
+				fPort++
+			}
+		}
+	}
+	out["ports"] = map[string]interface{}{
+		"total":    len(portItems),
+		"online":   portsOnline,
+		"offline":  portsOffline,
+		"faulty":   portsFaulty,
+		"disabled": portsDisabled,
+		"fPort":    fPort,
+		"ePort":    ePort,
+	}
+	// Top-level convenience fields for signal rules
+	out["portTotal"] = len(portItems)
+	out["portsOnline"] = portsOnline
+	out["portsOffline"] = portsOffline
+	out["portsFaulty"] = portsFaulty
+
+	// ── SFP / Media warnings ──
+	mediaItems := brocadeExtractArray(media, "media-rdp")
+	sfpWarnings := 0
+	for _, m := range mediaItems {
+		mm, _ := m.(map[string]interface{})
+		if mm == nil {
+			continue
+		}
+		// Check for power/temp alarm flags
+		if hasBrocadeMediaWarning(mm) {
+			sfpWarnings++
+		}
+	}
+	out["sfpWarnings"] = sfpWarnings
+
+	// ── Fabric ──
+	fabricSwitches := brocadeExtractArray(fabricInfo, "fabric-switch")
+	out["fabricSwitchCount"] = len(fabricSwitches)
+
+	// ── Zoning ──
+	if ec := brocadeExtractObject(zoneConfig, "effective-configuration"); ec != nil {
+		out["zoningActiveCfg"] = ec["cfg-name"]
+		if zones, ok := ec["zone"].([]interface{}); ok {
+			out["zoneCount"] = len(zones)
+		}
+	} else {
+		out["zoningActiveCfg"] = nil
+	}
+
+	// ── Raw data for investigation drill-down ──
+	out["_raw"] = map[string]interface{}{
+		"chassis":    chassis,
+		"switchInfo": switchInfo,
+		"ports":      ports,
+		"media":      media,
+		"zoneConfig": zoneConfig,
+		"fabric":     fabricInfo,
+	}
+
+	return out
+}
+
+// hasBrocadeMediaWarning checks if a media-rdp entry has any warning/alarm flags set.
+func hasBrocadeMediaWarning(m map[string]interface{}) bool {
+	alarmKeys := []string{
+		"remote-media-tx-power-alert-type",
+		"remote-media-rx-power-alert-type",
+		"remote-media-temperature-alert-type",
+	}
+	for _, k := range alarmKeys {
+		if v, ok := m[k].(float64); ok && v != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// ── HTTP helpers ───────────────────────────────────────────────────────
 
 func (a *BrocadeAdapter) brocadeGet(path string) (map[string]interface{}, error) {
 	req, err := http.NewRequest("GET", a.baseURL+path, nil)
@@ -205,14 +304,28 @@ func brocadeExtractArray(resp map[string]interface{}, key string) []interface{} 
 	if resp == nil {
 		return nil
 	}
-	// Try direct key
 	if arr, ok := resp[key].([]interface{}); ok {
 		return arr
 	}
-	// Try Response envelope
 	if r, ok := resp["Response"].(map[string]interface{}); ok {
 		if arr, ok := r[key].([]interface{}); ok {
 			return arr
+		}
+	}
+	return nil
+}
+
+// brocadeExtractObject extracts a single object from Brocade's nested Response envelope.
+func brocadeExtractObject(resp map[string]interface{}, key string) map[string]interface{} {
+	if resp == nil {
+		return nil
+	}
+	if obj, ok := resp[key].(map[string]interface{}); ok {
+		return obj
+	}
+	if r, ok := resp["Response"].(map[string]interface{}); ok {
+		if obj, ok := r[key].(map[string]interface{}); ok {
+			return obj
 		}
 	}
 	return nil
