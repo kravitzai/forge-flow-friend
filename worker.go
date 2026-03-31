@@ -119,8 +119,12 @@ func (w *Worker) Restart() error {
 
 	return w.Start()
 }
+// Adapter returns the live adapter instance for relay access.
+func (w *Worker) Adapter() TargetAdapter {
+	return w.adapter
+}
 
-// State returns a copy of the current worker state.
+
 func (w *Worker) State() WorkerState {
 	w.mu.RLock()
 	defer w.mu.RUnlock()

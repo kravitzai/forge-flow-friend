@@ -464,6 +464,16 @@ func (s *Supervisor) FindTarget(targetID string) *TargetProfile {
 	return nil
 }
 
+// FindAdapter returns the live adapter instance for a target by ID, or nil.
+func (s *Supervisor) FindAdapter(targetID string) TargetAdapter {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if w, ok := s.workers[targetID]; ok {
+		return w.Adapter()
+	}
+	return nil
+}
+
 // Status returns a summary of all workers.
 func (s *Supervisor) Status() []WorkerState {
 	s.mu.RLock()

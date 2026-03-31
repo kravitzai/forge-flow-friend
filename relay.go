@@ -278,7 +278,19 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 		return rh.executeTrueNAS(cmd, target, creds)
 	}
 
-	fullURL := joinURL(target.Endpoint, cmd.Path)
+	// Brocade: resolve the adapter's base URL (may have fallen back from HTTPS to HTTP)
+	// and use the correct Accept header for FOS REST API
+	baseEndpoint := target.Endpoint
+	isBrocade := normalizedTarget == "brocade" || normalizedPlatform == "brocade"
+	if isBrocade {
+		if adapter := rh.supervisor.FindAdapter(cmd.TargetProfileID); adapter != nil {
+			if ba, ok := adapter.(*BrocadeAdapter); ok && ba.baseURL != "" {
+				baseEndpoint = ba.baseURL
+			}
+		}
+	}
+
+	fullURL := joinURL(baseEndpoint, cmd.Path)
 
 	var bodyReader io.Reader
 	if cmd.Body != nil && (strings.ToUpper(cmd.Method) == "POST" || strings.ToUpper(cmd.Method) == "PUT" || strings.ToUpper(cmd.Method) == "PATCH") {
@@ -294,8 +306,14 @@ func (rh *RelayHandler) executeHTTP(cmd RelayCommand, target *TargetProfile, cre
 		return RelayResult{ID: cmd.ID, ErrorMessage: fmt.Sprintf("create request: %v", err)}
 	}
 
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Content-Type", "application/json")
+	// Brocade FOS requires YANG-data JSON content type
+	if isBrocade {
+		req.Header.Set("Accept", "application/yang-data+json")
+		req.Header.Set("Content-Type", "application/yang-data+json")
+	} else {
+		req.Header.Set("Accept", "application/json")
+		req.Header.Set("Content-Type", "application/json")
+	}
 
 	// Apply auth from credentials based on target auth type
 	applyAuth(req, target, creds)
