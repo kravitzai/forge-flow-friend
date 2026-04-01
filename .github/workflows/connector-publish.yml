@@ -230,8 +230,8 @@ jobs:
 
       - name: Build offline bundle
         run: |
-          chmod +x connector-agent/packaging/build-offline-bundle.sh
-          connector-agent/packaging/build-offline-bundle.sh \
+          chmod +x packaging/build-offline-bundle.sh
+          packaging/build-offline-bundle.sh \
             "${{ github.ref_name }}" \
             "${{ matrix.goos }}" \
             "${{ matrix.goarch }}" \
@@ -288,8 +288,8 @@ jobs:
 
       - name: Build .deb and .rpm packages
         run: |
-          chmod +x connector-agent/packaging/build-packages.sh
-          connector-agent/packaging/build-packages.sh \
+          chmod +x packaging/build-packages.sh
+          packaging/build-packages.sh \
             "${{ github.ref_name }}" \
             "${{ matrix.goarch }}" \
             "/tmp/connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}"
