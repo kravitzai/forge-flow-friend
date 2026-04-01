@@ -42,6 +42,7 @@ type UploadQueue struct {
 	maxRetries int
 
 	backend  *BackendClient
+	localDB  *LocalDB
 
 	stopCh   chan struct{}
 	notifyCh chan struct{}
@@ -59,6 +60,7 @@ type UploadQueueConfig struct {
 	WorkerCount  int
 	RetryBackoff time.Duration
 	MaxBackoff   time.Duration
+	LocalDB      *LocalDB
 }
 
 func DefaultUploadQueueConfig() UploadQueueConfig {
@@ -93,6 +95,7 @@ func NewUploadQueue(backend *BackendClient, cfg UploadQueueConfig) *UploadQueue 
 		maxSize:      cfg.MaxSize,
 		maxRetries:   cfg.MaxRetries,
 		backend:      backend,
+		localDB:      cfg.LocalDB,
 		stopCh:       make(chan struct{}),
 		notifyCh:     make(chan struct{}, 1),
 		workerCount:  cfg.WorkerCount,
@@ -251,8 +254,25 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 					F("target_id", item.TargetID), F("worker", workerID))
 			}
 			q.mu.Unlock()
-		} else {
+	} else {
 			agentMetrics.RecordUploadSuccess(item.SizeBytes)
+			// Mark synced in local DB if this was a
+			// Hybrid Mode summary upload
+			if q.localDB != nil {
+				if id, ok := item.Payload["_localSnapshotId"]; ok {
+					if snapshotID, ok := id.(string); ok && snapshotID != "" {
+						if err := q.localDB.MarkSynced(snapshotID); err != nil {
+							audit.Warn("local_db.sync",
+								"Failed to mark snapshot synced",
+								F("snapshot_id", snapshotID), Err(err))
+						} else {
+							audit.Debug("local_db.sync",
+								"Snapshot marked synced",
+								F("snapshot_id", snapshotID))
+						}
+					}
+				}
+			}
 		}
 	}
 }

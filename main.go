@@ -200,7 +200,9 @@ func main() {
 	}
 
 	// ── Upload Queue ──
-	uploadQueue := NewUploadQueue(backend, DefaultUploadQueueConfig())
+	uqCfg := DefaultUploadQueueConfig()
+	uqCfg.LocalDB = store.LocalDB()
+	uploadQueue := NewUploadQueue(backend, uqCfg)
 	uploadQueue.Start()
 	supervisor.SetUploadQueue(uploadQueue)
 
