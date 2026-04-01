@@ -31,12 +31,13 @@ const (
 // Only started when Hybrid Mode is enabled.
 // All endpoints except /v1/health require X-Local-Token.
 type LocalAPIServer struct {
-	db         *LocalDB
-	supervisor *Supervisor
-	token      string
-	bind       string
-	server     *http.Server
-	lanURL     string // e.g. "http://192.168.1.50:7070"
+	db          *LocalDB
+	supervisor  *Supervisor
+	token       string
+	bind        string
+	server      *http.Server
+	lanURL      string // e.g. "http://192.168.1.50:7070"
+	allowedNets []*net.IPNet // nil = localhost only
 }
 
 // NewLocalAPIServer creates and configures the server.
@@ -52,11 +53,19 @@ func NewLocalAPIServer(
 		bind = defaultLocalAPIBind
 	}
 
+	// Parse IP allowlist from env.
+	// Default: 127.0.0.1/32 (localhost only).
+	// Set FORGEAI_LOCAL_API_ALLOWED_CIDR to expand,
+	// e.g. "192.168.0.0/16,10.0.0.0/8"
+	allowedNets := parseAllowedCIDRs(
+		os.Getenv("FORGEAI_LOCAL_API_ALLOWED_CIDR"))
+
 	s := &LocalAPIServer{
-		db:         db,
-		supervisor: supervisor,
-		token:      token,
-		bind:       bind,
+		db:          db,
+		supervisor:  supervisor,
+		token:       token,
+		bind:        bind,
+		allowedNets: allowedNets,
 		lanURL: func() string {
 			if v := os.Getenv("FORGEAI_LOCAL_API_URL"); v != "" {
 				return v
@@ -66,9 +75,14 @@ func NewLocalAPIServer(
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/health", s.handleHealth)
-	mux.HandleFunc("/v1/targets", s.authMiddleware(s.handleTargets))
-	mux.HandleFunc("/v1/targets/", s.authMiddleware(s.handleTargetRoute))
+	mux.HandleFunc("/v1/health",
+		s.ipAllowedMiddleware(s.handleHealth))
+	mux.HandleFunc("/v1/targets",
+		s.ipAllowedMiddleware(
+			s.authMiddleware(s.handleTargets)))
+	mux.HandleFunc("/v1/targets/",
+		s.ipAllowedMiddleware(
+			s.authMiddleware(s.handleTargetRoute)))
 
 	s.server = &http.Server{
 		Addr:         bind,
@@ -84,6 +98,13 @@ func NewLocalAPIServer(
 // Start begins listening. Non-blocking — runs in a goroutine.
 func (s *LocalAPIServer) Start() {
 	go func() {
+		cidrs := make([]string, len(s.allowedNets))
+		for i, n := range s.allowedNets {
+			cidrs[i] = n.String()
+		}
+		audit.Info("local_api.config",
+			"IP allowlist configured",
+			F("allowed_cidrs", strings.Join(cidrs, ", ")))
 		audit.Info("local_api.start", "Local API server listening",
 			F("addr", s.bind),
 			F("lan_url", s.lanURL))
@@ -126,6 +147,44 @@ func (s *LocalAPIServer) authMiddleware(
 		}
 		next(w, r)
 	}
+}
+
+// ipAllowedMiddleware rejects requests from IPs not
+// in the allowedNets list. Applied to all endpoints.
+func (s *LocalAPIServer) ipAllowedMiddleware(
+	next http.HandlerFunc,
+) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ip := realIP(r)
+		if ip == nil {
+			s.writeError(w, http.StatusForbidden,
+				"could not determine client IP")
+			return
+		}
+		for _, network := range s.allowedNets {
+			if network.Contains(ip) {
+				next(w, r)
+				return
+			}
+		}
+		audit.Warn("local_api.blocked",
+			"Request blocked by IP allowlist",
+			F("remote_ip", ip.String()),
+			F("path", r.URL.Path))
+		s.writeError(w, http.StatusForbidden,
+			"client IP not in allowed range")
+	}
+}
+
+// realIP extracts the client IP from RemoteAddr,
+// stripping the port.
+func realIP(r *http.Request) net.IP {
+	host := r.RemoteAddr
+	// Strip port if present
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	return net.ParseIP(host)
 }
 
 // ── Handlers ──
@@ -284,6 +343,37 @@ func (s *LocalAPIServer) setCORS(w http.ResponseWriter) {
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Headers",
 		"X-Local-Token, Content-Type")
+}
+
+// parseAllowedCIDRs parses a comma-separated list of
+// CIDR ranges. Falls back to localhost-only if the
+// input is empty or entirely invalid.
+func parseAllowedCIDRs(raw string) []*net.IPNet {
+	// Always include localhost
+	_, loopback, _ := net.ParseCIDR("127.0.0.1/32")
+	_, loopback6, _ := net.ParseCIDR("::1/128")
+	nets := []*net.IPNet{loopback, loopback6}
+
+	if raw == "" {
+		return nets
+	}
+
+	for _, cidr := range strings.Split(raw, ",") {
+		cidr = strings.TrimSpace(cidr)
+		if cidr == "" {
+			continue
+		}
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			audit.Warn("local_api.config",
+				"Invalid CIDR in FORGEAI_LOCAL_API_ALLOWED_CIDR",
+				F("cidr", cidr), Err(err))
+			continue
+		}
+		nets = append(nets, ipNet)
+	}
+
+	return nets
 }
 
 // detectLANURL finds the first non-loopback IPv4 address
