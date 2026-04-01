@@ -270,8 +270,18 @@ func main() {
 			bind = defaultLocalAPIBind
 		}
 		localAPI = NewLocalAPIServer(
-			ldb, supervisor, localAPIToken, bind)
+			ldb, supervisor, localAPIToken, bind, configDir)
 		localAPI.Start()
+
+		// Give TLS init a moment to update the LAN URL
+		// then re-register with the https scheme
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			supervisor.SetLocalAPIURL(localAPI.LANURL())
+			audit.Info("local_api.start",
+				"LAN URL finalised",
+				F("url", localAPI.LANURL()))
+		}()
 	}
 
 	if localAPI != nil {

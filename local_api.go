@@ -4,6 +4,11 @@
 // over the LAN in Hybrid Mode. Endpoints are authenticated via a
 // pre-shared X-Local-Token header (except /v1/health).
 //
+// TLS: On first start the server generates a self-signed ECDSA P-256
+// certificate stored alongside local.db in the config directory.
+// Subsequent starts reuse the existing cert. If cert generation fails
+// the server falls back to plain HTTP with a warning.
+//
 // Endpoints:
 //   GET /v1/health              — unauthenticated reachability probe
 //   GET /v1/targets             — list all targets with status
@@ -13,11 +18,19 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"math/big"
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -36,18 +49,22 @@ type LocalAPIServer struct {
 	token       string
 	bind        string
 	server      *http.Server
-	lanURL      string // e.g. "http://192.168.1.50:7070"
+	lanURL      string // e.g. "https://192.168.1.50:7070"
 	allowedNets []*net.IPNet // nil = localhost only
+	certFile    string
+	keyFile     string
 }
 
 // NewLocalAPIServer creates and configures the server.
 // token is the pre-shared auth token.
 // bind is the listen address (e.g. "0.0.0.0:7070").
+// certDir is where TLS cert/key files are stored.
 func NewLocalAPIServer(
 	db *LocalDB,
 	supervisor *Supervisor,
 	token string,
 	bind string,
+	certDir string,
 ) *LocalAPIServer {
 	if bind == "" {
 		bind = defaultLocalAPIBind
@@ -60,14 +77,21 @@ func NewLocalAPIServer(
 	allowedNets := parseAllowedCIDRs(
 		os.Getenv("FORGEAI_LOCAL_API_ALLOWED_CIDR"))
 
+	certFile := filepath.Join(certDir, "local-api.crt")
+	keyFile := filepath.Join(certDir, "local-api.key")
+
 	s := &LocalAPIServer{
 		db:          db,
 		supervisor:  supervisor,
 		token:       token,
 		bind:        bind,
 		allowedNets: allowedNets,
+		certFile:    certFile,
+		keyFile:     keyFile,
 		lanURL: func() string {
 			if v := os.Getenv("FORGEAI_LOCAL_API_URL"); v != "" {
+				// Normalise to https since TLS is always attempted
+				v = strings.Replace(v, "http://", "https://", 1)
 				return v
 			}
 			return detectLANURL(bind)
@@ -96,8 +120,41 @@ func NewLocalAPIServer(
 }
 
 // Start begins listening. Non-blocking — runs in a goroutine.
+// Attempts TLS with self-signed cert; falls back to HTTP on failure.
 func (s *LocalAPIServer) Start() {
+	// Ensure cert exists — generate if missing
+	if err := s.ensureCert(); err != nil {
+		audit.Warn("local_api.tls",
+			"Failed to init TLS cert — falling back to HTTP",
+			Err(err))
+		// Fall back to plain HTTP
+		go func() {
+			cidrs := make([]string, len(s.allowedNets))
+			for i, n := range s.allowedNets {
+				cidrs[i] = n.String()
+			}
+			audit.Info("local_api.config",
+				"IP allowlist configured",
+				F("allowed_cidrs", strings.Join(cidrs, ", ")))
+			audit.Info("local_api.start",
+				"Local API server listening (HTTP fallback)",
+				F("addr", s.bind),
+				F("lan_url", s.lanURL))
+			if err := s.server.ListenAndServe(); err != nil &&
+				err != http.ErrServerClosed {
+				audit.Error("local_api.start",
+					"Local API server error", Err(err))
+			}
+		}()
+		return
+	}
+
 	go func() {
+		// Update advertised URL to use https
+		if strings.HasPrefix(s.lanURL, "http://") {
+			s.lanURL = "https" + s.lanURL[4:]
+		}
+
 		cidrs := make([]string, len(s.allowedNets))
 		for i, n := range s.allowedNets {
 			cidrs[i] = n.String()
@@ -105,15 +162,135 @@ func (s *LocalAPIServer) Start() {
 		audit.Info("local_api.config",
 			"IP allowlist configured",
 			F("allowed_cidrs", strings.Join(cidrs, ", ")))
-		audit.Info("local_api.start", "Local API server listening",
+		audit.Info("local_api.start",
+			"Local API server listening (HTTPS)",
 			F("addr", s.bind),
 			F("lan_url", s.lanURL))
-		if err := s.server.ListenAndServe(); err != nil &&
+		if err := s.server.ListenAndServeTLS(
+			s.certFile, s.keyFile); err != nil &&
 			err != http.ErrServerClosed {
 			audit.Error("local_api.start",
 				"Local API server error", Err(err))
 		}
 	}()
+}
+
+// ensureCert generates a self-signed ECDSA cert if
+// the cert/key files don't already exist.
+// Valid for 10 years, SAN includes the LAN IP.
+func (s *LocalAPIServer) ensureCert() error {
+	// If both files exist, reuse them
+	if _, err := os.Stat(s.certFile); err == nil {
+		if _, err := os.Stat(s.keyFile); err == nil {
+			audit.Info("local_api.tls",
+				"Reusing existing TLS cert",
+				F("cert", s.certFile))
+			return nil
+		}
+	}
+
+	audit.Info("local_api.tls",
+		"Generating self-signed TLS cert",
+		F("cert", s.certFile))
+
+	// Generate ECDSA P-256 key
+	priv, err := ecdsa.GenerateKey(
+		elliptic.P256(), rand.Reader)
+	if err != nil {
+		return fmt.Errorf("generate key: %w", err)
+	}
+
+	// Parse LAN IP for SAN
+	var ipAddrs []net.IP
+	if s.lanURL != "" {
+		host := s.lanURL
+		// Strip scheme
+		for _, pfx := range []string{
+			"https://", "http://"} {
+			host = strings.TrimPrefix(host, pfx)
+		}
+		// Strip port
+		if h, _, err :=
+			net.SplitHostPort(host); err == nil {
+			host = h
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			ipAddrs = append(ipAddrs, ip)
+		}
+	}
+
+	// Always include loopback
+	ipAddrs = append(ipAddrs,
+		net.ParseIP("127.0.0.1"),
+		net.ParseIP("::1"))
+
+	serial, _ := rand.Int(rand.Reader,
+		new(big.Int).Lsh(big.NewInt(1), 128))
+
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject: pkix.Name{
+			Organization: []string{"ForgeAI Local Agent"},
+			CommonName:   "forgeai-local",
+		},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		IPAddresses:           ipAddrs,
+	}
+
+	certDER, err := x509.CreateCertificate(
+		rand.Reader, tmpl, tmpl,
+		&priv.PublicKey, priv)
+	if err != nil {
+		return fmt.Errorf("create cert: %w", err)
+	}
+
+	// Write cert PEM
+	certOut, err := os.OpenFile(
+		s.certFile,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		return fmt.Errorf("open cert file: %w", err)
+	}
+	defer certOut.Close()
+	if err := pem.Encode(certOut,
+		&pem.Block{
+			Type:  "CERTIFICATE",
+			Bytes: certDER,
+		}); err != nil {
+		return fmt.Errorf("write cert: %w", err)
+	}
+
+	// Write key PEM
+	keyOut, err := os.OpenFile(
+		s.keyFile,
+		os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("open key file: %w", err)
+	}
+	defer keyOut.Close()
+	privDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return fmt.Errorf("marshal key: %w", err)
+	}
+	if err := pem.Encode(keyOut,
+		&pem.Block{
+			Type:  "EC PRIVATE KEY",
+			Bytes: privDER,
+		}); err != nil {
+		return fmt.Errorf("write key: %w", err)
+	}
+
+	audit.Info("local_api.tls",
+		"TLS cert generated",
+		F("valid_until",
+			tmpl.NotAfter.Format("2006-01-02")),
+		F("san_ips", fmt.Sprintf("%v", ipAddrs)))
+
+	return nil
 }
 
 // Stop gracefully shuts down the server with a 5s timeout.
