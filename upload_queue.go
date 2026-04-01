@@ -209,11 +209,12 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 
 		item := q.dequeue()
 		if item == nil {
-		select {
-		case <-q.stopCh:
-			return
-		case <-q.notifyCh:
-		}
+			select {
+			case <-q.stopCh:
+				return
+			case <-q.notifyCh:
+				continue
+			}
 		}
 
 		err := q.backend.Post(item.Token, item.Payload)
