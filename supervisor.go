@@ -414,10 +414,7 @@ func (s *Supervisor) RemoveTarget(targetID string) error {
 	}
 
 	// Persist
-	s.mu.RLock()
-	err := s.store.SaveState(s.state)
-	s.mu.RUnlock()
-	return err
+	return s.store.SaveState(s.state)
 }
 
 // GetConnectorToken returns the host's connector token for backend auth.

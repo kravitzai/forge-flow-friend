@@ -18,6 +18,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -256,6 +257,9 @@ func main() {
 		}
 
 		if updatePolicy != UpdatePolicyNone {
+			updateCtx, updateCancel := context.WithCancel(context.Background())
+			defer updateCancel()
+
 			go func() {
 				checkInterval := 6 * time.Hour
 				ticker := time.NewTicker(checkInterval)
@@ -263,7 +267,7 @@ func main() {
 
 				for {
 					select {
-					case <-sigCh:
+					case <-updateCtx.Done():
 						return
 					case <-ticker.C:
 						manifest, err := updateManager.CheckForUpdate(updatePolicy)
