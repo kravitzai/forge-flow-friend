@@ -249,20 +249,9 @@ func main() {
 			F("default_days", 7))
 	}
 
-	// Reconcile — starts workers for all enabled targets
-	if err := supervisor.Reconcile(); err != nil {
-		audit.Critical("host.startup", "Reconciliation failed", Err(err))
-		os.Exit(1)
-	}
-
-	if ldb := store.LocalDB(); ldb != nil {
-		stats := ldb.Stats()
-		audit.Info("local_db.stats", "Local DB ready",
-			F("snapshot_count", stats["snapshot_count"]),
-			F("unsynced_count", stats["unsynced_count"]))
-	}
-
 	// ── Local API Server (Hybrid Mode) ──
+	// Must be set up BEFORE Reconcile() so workers get the LAN URL/token
+	// at creation time and include them in heartbeats.
 	var localAPI *LocalAPIServer
 	if ldb := store.LocalDB(); ldb != nil {
 		bind := os.Getenv("FORGEAI_LOCAL_API_BIND")
@@ -272,6 +261,16 @@ func main() {
 		localAPI = NewLocalAPIServer(
 			ldb, supervisor, localAPIToken, bind, configDir)
 		localAPI.Start()
+
+		// Register LAN URL and token on supervisor so workers include
+		// them in heartbeat payloads
+		supervisor.SetLocalAPIURL(localAPI.LANURL())
+		supervisor.SetLocalAPIToken(localAPIToken)
+
+		stats := ldb.Stats()
+		audit.Info("local_db.stats", "Local DB ready",
+			F("snapshot_count", stats["snapshot_count"]),
+			F("unsynced_count", stats["unsynced_count"]))
 
 		// Give TLS init a moment to update the LAN URL
 		// then re-register with the https scheme
@@ -284,9 +283,10 @@ func main() {
 		}()
 	}
 
-	if localAPI != nil {
-		supervisor.SetLocalAPIURL(localAPI.LANURL())
-		supervisor.SetLocalAPIToken(localAPIToken)
+	// Reconcile — starts workers for all enabled targets
+	if err := supervisor.Reconcile(); err != nil {
+		audit.Critical("host.startup", "Reconciliation failed", Err(err))
+		os.Exit(1)
 	}
 
 	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
