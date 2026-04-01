@@ -65,6 +65,7 @@ jobs:
       - name: Build sanity check
         run: |
           echo "Building connector host binary..."
+          go mod tidy
           CGO_ENABLED=0 go build -o connector-agent-test .
           echo "✓ Build succeeded"
 
@@ -174,6 +175,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: "0"
         run: |
+          go mod tidy
           OUTNAME="connector-agent-${{ matrix.goos }}-${{ matrix.goarch }}"
           go build -ldflags="-s -w -X main.HostVersion=${{ github.ref_name }}" -o "$OUTNAME" .
           tar czf "${OUTNAME}.tar.gz" "$OUTNAME"
