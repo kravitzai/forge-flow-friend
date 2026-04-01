@@ -105,7 +105,8 @@ func main() {
 	}
 
 	// Initialize encrypted store
-	store, err := NewStore(configDir)
+	hybridMode := os.Getenv("FORGEAI_HYBRID_MODE") == "true"
+	store, err := NewStore(configDir, hybridMode)
 	if err != nil {
 		audit.Critical("host.startup", "Store initialization failed", Err(err))
 		os.Exit(1)

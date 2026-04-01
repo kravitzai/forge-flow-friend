@@ -32,6 +32,9 @@ type Worker struct {
 	// Upload queue (nil = inline upload for backward compat)
 	uploadQueue *UploadQueue
 
+	// Local DB for hybrid mode (nil = disabled)
+	localDB *LocalDB
+
 	// Callbacks
 	onStateChange func(targetID string, status WorkerStatus)
 }
@@ -45,6 +48,7 @@ type WorkerConfig struct {
 	Backend       *BackendClient
 	HostToken     string
 	UploadQueue   *UploadQueue
+	LocalDB       *LocalDB
 	OnStateChange func(targetID string, status WorkerStatus)
 }
 
@@ -62,6 +66,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		backend:       cfg.Backend,
 		hostToken:     cfg.HostToken,
 		uploadQueue:   cfg.UploadQueue,
+		localDB:       cfg.LocalDB,
 		onStateChange: cfg.OnStateChange,
 		state: WorkerState{
 			TargetID: cfg.Profile.TargetID,

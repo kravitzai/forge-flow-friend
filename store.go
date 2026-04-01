@@ -40,11 +40,12 @@ type Store struct {
 	mu        sync.RWMutex
 	configDir string
 	key       []byte // derived encryption key
+	localDB   *LocalDB
 }
 
 // NewStore creates a store rooted at the given directory.
 // If the directory does not exist, it will be created with mode 0700.
-func NewStore(configDir string) (*Store, error) {
+func NewStore(configDir string, hybridMode bool) (*Store, error) {
 	if configDir == "" {
 		configDir = defaultConfigDir
 	}
@@ -70,7 +71,29 @@ func NewStore(configDir string) (*Store, error) {
 		return nil, fmt.Errorf("key init: %w", err)
 	}
 
+	if hybridMode {
+		ldb, err := NewLocalDB(configDir, s)
+		if err != nil {
+			if audit != nil {
+				audit.Warn("local_db.open",
+					"Failed to open local DB — hybrid mode disabled",
+					Err(err))
+			}
+		} else {
+			s.localDB = ldb
+			if audit != nil {
+				audit.Info("local_db.open",
+					"Hybrid Mode enabled — local DB active")
+			}
+		}
+	}
+
 	return s, nil
+}
+
+// LocalDB returns the local database instance, or nil if hybrid mode is disabled.
+func (s *Store) LocalDB() *LocalDB {
+	return s.localDB
 }
 
 // checkWritable verifies the config directory is writable.

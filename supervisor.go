@@ -23,6 +23,7 @@ type Supervisor struct {
 	backend       *BackendClient
 	policy        RetryPolicy
 	uploadQueue   *UploadQueue           // shared upload queue (nil = inline)
+	localDB       *LocalDB               // hybrid mode local DB (nil = disabled)
 	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
 	failedRetries map[string]int         // targetID -> consecutive retry count
 }
@@ -35,6 +36,7 @@ func NewSupervisor(store *Store, backend *BackendClient) *Supervisor {
 		adapters:      make(map[string]AdapterFactory),
 		backend:       backend,
 		policy:        DefaultRetryPolicy(),
+		localDB:       store.LocalDB(),
 		failedRetryAt: make(map[string]time.Time),
 		failedRetries: make(map[string]int),
 	}
@@ -259,6 +261,7 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 		Backend:     s.backend,
 		HostToken:   s.state.Identity.ConnectorToken,
 		UploadQueue: s.uploadQueue,
+		LocalDB:     s.localDB,
 		OnStateChange: func(targetID string, status WorkerStatus) {
 			s.onWorkerStateChange(targetID, status)
 		},
