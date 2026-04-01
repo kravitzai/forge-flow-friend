@@ -37,6 +37,7 @@ type HostConfig struct {
 	PinnedPublicKey      string `json:"pinned_public_key"`      // ed25519 public key for update verification
 	InsecureSkipVerify   bool   `json:"insecure_skip_verify"`   // global TLS override
 	SyncIntervalSecs     int    `json:"sync_interval_secs"`     // desired-state polling interval
+	LocalRetentionDays   int    `json:"local_retention_days"`   // hybrid mode: days to keep local snapshots
 
 	// Remote action controls (both default to false — admin must opt in)
 	RemoteLiveQueryEnabled bool `json:"remote_live_query_enabled"` // allow Live Query relay commands

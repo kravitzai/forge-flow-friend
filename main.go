@@ -62,6 +62,12 @@ func main() {
 		remoteRestart = true
 	}
 
+	hybridMode := envBool("FORGEAI_HYBRID_MODE")
+	if hybridMode {
+		audit.Info("host.startup",
+			"Hybrid Mode enabled — local DB will be activated")
+	}
+
 	// ── Parse change-operation policy from environment ──
 	changePolicyConfig := ParseChangePolicyFromEnv()
 	changePolicyConfig.LogStartupSummary()
@@ -105,7 +111,6 @@ func main() {
 	}
 
 	// Initialize encrypted store
-	hybridMode := os.Getenv("FORGEAI_HYBRID_MODE") == "true"
 	store, err := NewStore(configDir, hybridMode)
 	if err != nil {
 		audit.Critical("host.startup", "Store initialization failed", Err(err))
@@ -203,10 +208,47 @@ func main() {
 	metricsStopCh := make(chan struct{})
 	StartMetricsLogger(5*time.Minute, metricsStopCh)
 
+	// ── Hybrid Mode: local DB retention goroutine ──
+	var retentionStopCh chan struct{}
+	if ldb := store.LocalDB(); ldb != nil {
+		retentionStopCh = make(chan struct{})
+		go func() {
+			ticker := time.NewTicker(1 * time.Hour)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-retentionStopCh:
+					return
+				case <-ticker.C:
+					maxDays := 7
+					if st := supervisor.GetState(); st != nil {
+						if d := st.Config.LocalRetentionDays; d > 0 {
+							maxDays = d
+						}
+					}
+					if _, err := ldb.RunRetention(maxDays); err != nil {
+						audit.Error("local_db.retention",
+							"Retention run failed", Err(err))
+					}
+				}
+			}
+		}()
+		audit.Info("local_db.retention",
+			"Retention goroutine started",
+			F("default_days", 7))
+	}
+
 	// Reconcile — starts workers for all enabled targets
 	if err := supervisor.Reconcile(); err != nil {
 		audit.Critical("host.startup", "Reconciliation failed", Err(err))
 		os.Exit(1)
+	}
+
+	if ldb := store.LocalDB(); ldb != nil {
+		stats := ldb.Stats()
+		audit.Info("local_db.stats", "Local DB ready",
+			F("snapshot_count", stats["snapshot_count"]),
+			F("unsynced_count", stats["unsynced_count"]))
 	}
 
 	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
@@ -314,6 +356,19 @@ func main() {
 
 	// Stop upload queue after workers are done
 	uploadQueue.Stop()
+
+	if retentionStopCh != nil {
+		close(retentionStopCh)
+	}
+	if ldb := store.LocalDB(); ldb != nil {
+		if err := ldb.Close(); err != nil {
+			audit.Warn("local_db.shutdown",
+				"Local DB close error", Err(err))
+		} else {
+			audit.Info("local_db.shutdown",
+				"Local DB closed cleanly")
+		}
+	}
 
 	audit.Info("host.shutdown", "Shutdown complete")
 }
