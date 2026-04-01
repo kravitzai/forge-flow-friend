@@ -68,6 +68,15 @@ func main() {
 			"Hybrid Mode enabled — local DB will be activated")
 	}
 
+	// ── Local API token ──
+	localAPIToken := os.Getenv("FORGEAI_LOCAL_API_TOKEN")
+	if localAPIToken == "" && hybridMode {
+		localAPIToken = generateID() // random per startup
+		audit.Info("local_api.start",
+			"Local API token generated (set FORGEAI_LOCAL_API_TOKEN to pin)",
+			F("token", localAPIToken))
+	}
+
 	// ── Parse change-operation policy from environment ──
 	changePolicyConfig := ParseChangePolicyFromEnv()
 	changePolicyConfig.LogStartupSummary()
@@ -253,6 +262,22 @@ func main() {
 			F("unsynced_count", stats["unsynced_count"]))
 	}
 
+	// ── Local API Server (Hybrid Mode) ──
+	var localAPI *LocalAPIServer
+	if ldb := store.LocalDB(); ldb != nil {
+		bind := os.Getenv("FORGEAI_LOCAL_API_BIND")
+		if bind == "" {
+			bind = defaultLocalAPIBind
+		}
+		localAPI = NewLocalAPIServer(
+			ldb, supervisor, localAPIToken, bind)
+		localAPI.Start()
+	}
+
+	if localAPI != nil {
+		supervisor.SetLocalAPIURL(localAPI.LANURL())
+	}
+
 	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
 
 	// Set up signal channel early for use by update goroutine
@@ -358,6 +383,10 @@ func main() {
 
 	// Stop upload queue after workers are done
 	uploadQueue.Stop()
+
+	if localAPI != nil {
+		localAPI.Stop()
+	}
 
 	if retentionStopCh != nil {
 		close(retentionStopCh)

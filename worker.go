@@ -35,6 +35,9 @@ type Worker struct {
 	// Local DB for hybrid mode (nil = disabled)
 	localDB *LocalDB
 
+	// LAN URL for local API (empty = not advertised)
+	localAPIURL string
+
 	// Callbacks
 	onStateChange func(targetID string, status WorkerStatus)
 }
@@ -49,6 +52,7 @@ type WorkerConfig struct {
 	HostToken     string
 	UploadQueue   *UploadQueue
 	LocalDB       *LocalDB
+	LocalAPIURL   string
 	OnStateChange func(targetID string, status WorkerStatus)
 }
 
@@ -67,6 +71,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		hostToken:     cfg.HostToken,
 		uploadQueue:   cfg.UploadQueue,
 		localDB:       cfg.LocalDB,
+		localAPIURL:   cfg.LocalAPIURL,
 		onStateChange: cfg.OnStateChange,
 		state: WorkerState{
 			TargetID: cfg.Profile.TargetID,
@@ -426,6 +431,9 @@ func (w *Worker) sendHeartbeat() {
 	}
 	if lastErr != "" {
 		payload["lastError"] = lastErr
+	}
+	if w.localAPIURL != "" {
+		payload["localApiUrl"] = w.localAPIURL
 	}
 
 	if err := w.backend.Post(w.hostToken, payload); err != nil {

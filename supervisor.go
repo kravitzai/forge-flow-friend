@@ -24,6 +24,7 @@ type Supervisor struct {
 	policy        RetryPolicy
 	uploadQueue   *UploadQueue           // shared upload queue (nil = inline)
 	localDB       *LocalDB               // hybrid mode local DB (nil = disabled)
+	localAPIURL   string                 // LAN URL for local API server
 	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
 	failedRetries map[string]int         // targetID -> consecutive retry count
 }
@@ -54,6 +55,22 @@ func (s *Supervisor) SetUploadQueue(q *UploadQueue) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.uploadQueue = q
+}
+
+// SetLocalAPIURL registers the LAN URL for heartbeat advertisement.
+func (s *Supervisor) SetLocalAPIURL(url string) {
+	s.mu.Lock()
+	s.localAPIURL = url
+	s.mu.Unlock()
+	audit.Info("local_api.start",
+		"LAN URL registered", F("url", url))
+}
+
+// GetLocalAPIURL returns the advertised LAN URL.
+func (s *Supervisor) GetLocalAPIURL() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.localAPIURL
 }
 
 // Initialize loads or creates host state, handles legacy migration.
@@ -262,6 +279,7 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 		HostToken:   s.state.Identity.ConnectorToken,
 		UploadQueue: s.uploadQueue,
 		LocalDB:     s.localDB,
+		LocalAPIURL: s.localAPIURL,
 		OnStateChange: func(targetID string, status WorkerStatus) {
 			s.onWorkerStateChange(targetID, status)
 		},
