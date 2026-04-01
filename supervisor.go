@@ -8,6 +8,7 @@ package main
 
 import (
 	"fmt"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -181,13 +182,14 @@ func (s *Supervisor) Reconcile() error {
 				retryCount := s.failedRetries[target.TargetID] + 1
 				s.failedRetries[target.TargetID] = retryCount
 				backoff := time.Duration(30) * time.Second
-				for i := 1; i < retryCount && backoff < 60*time.Second; i++ {
+				for i := 1; i < retryCount && backoff < 5*time.Minute; i++ {
 					backoff *= 2
 				}
-				if backoff > 60*time.Second {
-					backoff = 60 * time.Second
+				if backoff > 5*time.Minute {
+					backoff = 5 * time.Minute
 				}
-				s.failedRetryAt[target.TargetID] = time.Now().Add(backoff)
+				jitter := time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64()))
+				s.failedRetryAt[target.TargetID] = time.Now().Add(jitter)
 				// Fall through to Case 4 to start a fresh worker
 			} else {
 				// Clear retry tracking on healthy workers
