@@ -292,23 +292,54 @@ func (w *Worker) collect() {
 	payload["targetId"] = w.profile.TargetID
 	payload["targetType"] = w.profile.TargetType
 
-	// Upload via queue or inline
+	// ── Hybrid Mode: write full payload to local DB ──
+	if w.localDB != nil {
+		snapshotID := generateID()
+		// Extract signals from payload if present.
+		// Adapters may include a "_signals" key; fall back
+		// to empty slice if not present.
+		var signals []SnapshotSignal
+		if raw, ok := payload["_signals"]; ok {
+			if sl, ok := raw.([]SnapshotSignal); ok {
+				signals = sl
+			}
+		}
+		if err := w.localDB.WriteSnapshot(
+			snapshotID,
+			w.profile.TargetID,
+			w.profile.TargetType,
+			time.Now(),
+			payload,
+			signals,
+		); err != nil {
+			audit.Warn("local_db.write",
+				"Failed to write snapshot to local DB",
+				append(w.targetFields(), Err(err))...)
+			// Non-fatal: continue with cloud upload
+		} else {
+			// Tag the payload with the local snapshot ID
+			// so the cloud summary can reference it
+			payload["_localSnapshotId"] = snapshotID
+		}
+	}
+
+	// ── Cloud upload ──
+	// In Hybrid Mode, strip raw snapshot_data before
+	// sending to cloud — only send summary.
+	uploadPayload := payload
+	if w.localDB != nil {
+		uploadPayload = buildCloudSummaryPayload(payload)
+	}
+
 	if w.uploadQueue != nil {
-		priority := ClassifySnapshotPriority(payload)
-		if !w.uploadQueue.Enqueue(w.hostToken, payload, priority) {
+		priority := ClassifySnapshotPriority(uploadPayload)
+		if !w.uploadQueue.Enqueue(w.hostToken, uploadPayload, priority) {
 			audit.Error("upload.dropped", "Snapshot dropped by upload queue", w.targetFields()...)
 		}
 	} else {
-		// Inline fallback (legacy)
-		if err := w.backend.Post(w.hostToken, payload); err != nil {
+		if err := w.backend.Post(w.hostToken, uploadPayload); err != nil {
 			audit.Warn("upload.failed", "Snapshot delivery failed",
 				append(w.targetFields(), Err(err))...)
-		} else {
-			audit.Info("upload.success", "Snapshot delivered",
-				append(w.targetFields(),
-					F("payload_bytes", payloadBytes),
-					F("duration_ms", collectDuration.Milliseconds()),
-				)...)
 		}
 	}
 }
@@ -430,4 +461,47 @@ func (w *Worker) notifyStateChange(status WorkerStatus) {
 	if w.onStateChange != nil {
 		w.onStateChange(w.profile.TargetID, status)
 	}
+}
+
+// buildCloudSummaryPayload strips the raw snapshotData
+// from a payload, replacing it with a summary envelope.
+// All other fields (targetId, targetType, collectedAt,
+// alerts, type) are preserved.
+//
+// This is the Hybrid Mode cloud-sync path — raw data
+// stays on-prem, only the summary reaches the cloud.
+func buildCloudSummaryPayload(
+	payload map[string]interface{},
+) map[string]interface{} {
+	summary := make(map[string]interface{})
+
+	// Preserve envelope fields
+	for _, k := range []string{
+		"targetId", "targetType", "collectedAt",
+		"type", "agentVersion", "_localSnapshotId",
+	} {
+		if v, ok := payload[k]; ok {
+			summary[k] = v
+		}
+	}
+
+	// Mark as summary so the edge function knows
+	// not to expect snapshotData
+	summary["_hybridSummary"] = true
+
+	// Include alert count and top alerts for
+	// Unified Ops attention feed
+	if alerts, ok := payload["alerts"]; ok {
+		summary["alerts"] = alerts
+	}
+
+	// Include signal summary if signals were tagged
+	if signals, ok := payload["_signals"]; ok {
+		if sl, ok := signals.([]SnapshotSignal); ok {
+			s := buildSummary(sl)
+			summary["_signalSummary"] = s
+		}
+	}
+
+	return summary
 }
