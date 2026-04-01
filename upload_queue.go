@@ -44,6 +44,7 @@ type UploadQueue struct {
 	backend  *BackendClient
 
 	stopCh   chan struct{}
+	notifyCh chan struct{}
 	wg       sync.WaitGroup
 
 	workerCount   int
@@ -93,6 +94,7 @@ func NewUploadQueue(backend *BackendClient, cfg UploadQueueConfig) *UploadQueue 
 		maxRetries:   cfg.MaxRetries,
 		backend:      backend,
 		stopCh:       make(chan struct{}),
+		notifyCh:     make(chan struct{}, 1),
 		workerCount:  cfg.WorkerCount,
 		retryBackoff: cfg.RetryBackoff,
 		maxBackoff:   cfg.MaxBackoff,
@@ -157,6 +159,12 @@ func (q *UploadQueue) Enqueue(token string, payload map[string]interface{}, prio
 	q.items = append(q.items, item)
 	agentMetrics.SetQueueDepth(len(q.items))
 
+	// Notify waiting workers
+	select {
+	case q.notifyCh <- struct{}{}:
+	default:
+	}
+
 	return true
 }
 
@@ -201,12 +209,11 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 
 		item := q.dequeue()
 		if item == nil {
-			select {
-			case <-q.stopCh:
-				return
-			case <-time.After(500 * time.Millisecond):
-				continue
-			}
+		select {
+		case <-q.stopCh:
+			return
+		case <-q.notifyCh:
+		}
 		}
 
 		err := q.backend.Post(item.Token, item.Payload)
