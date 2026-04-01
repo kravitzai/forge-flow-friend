@@ -283,25 +283,60 @@ func normalizeBrocadeSnapshot(
 	fabricSwitches := brocadeExtractArray(fabricInfo, "fabric-switch")
 	out["fabricSwitchCount"] = len(fabricSwitches)
 
-	// ── Zoning (effective) ──
+	// ── Zoning (defined) — extract first so we can cross-reference ──
+	var definedZones []interface{}
+	var definedCfgs []interface{}
+	var definedAliases []interface{}
+	if dc := brocadeExtractFirst(definedConfig, "defined-configuration"); dc != nil {
+		definedZones = normalizeToSlice(dc["zone"])
+		definedAliases = normalizeToSlice(dc["alias"])
+		definedCfgs = normalizeToSlice(dc["cfg"])
+	}
+	out["definedZoneCount"] = len(definedZones)
+	out["definedAliasCount"] = len(definedAliases)
+	out["definedCfgCount"] = len(definedCfgs)
+
+	// ── Zoning (effective) — cross-reference against defined if zone list missing ──
+	activeCfgName := ""
+	effectiveZoneCount := 0
+	var effectiveZoneNames []interface{}
+	effectiveZoneCountResolved := false
+
 	if ec := brocadeExtractFirst(zoneConfig, "effective-configuration"); ec != nil {
-		out["zoningActiveCfg"] = ec["cfg-name"]
-		out["effectiveZoneCount"] = len(normalizeToSlice(ec["zone"]))
-	} else {
-		out["zoningActiveCfg"] = nil
-		out["effectiveZoneCount"] = 0
+		if cfgName, ok := ec["cfg-name"].(string); ok {
+			activeCfgName = cfgName
+		}
+		explicitZones := normalizeToSlice(ec["zone"])
+		if len(explicitZones) > 0 {
+			// FOS included the zone list directly — use it
+			effectiveZoneCount = len(explicitZones)
+			effectiveZoneCountResolved = true
+		} else if activeCfgName != "" {
+			// Cross-reference: find matching cfg in defined config
+			for _, cfgRaw := range definedCfgs {
+				cfgMap, _ := cfgRaw.(map[string]interface{})
+				if cfgMap == nil {
+					continue
+				}
+				if cfgMap["cfg-name"] == activeCfgName {
+					memberZone, _ := cfgMap["member-zone"].(map[string]interface{})
+					if memberZone != nil {
+						effectiveZoneNames = normalizeToSlice(memberZone["zone-name"])
+						effectiveZoneCount = len(effectiveZoneNames)
+					}
+					effectiveZoneCountResolved = true
+					break
+				}
+			}
+		}
 	}
 
-	// ── Zoning (defined) ──
-	if dc := brocadeExtractFirst(definedConfig, "defined-configuration"); dc != nil {
-		out["definedZoneCount"] = len(normalizeToSlice(dc["zone"]))
-		out["definedAliasCount"] = len(normalizeToSlice(dc["alias"]))
-		out["definedCfgCount"] = len(normalizeToSlice(dc["cfg"]))
-	} else {
-		out["definedZoneCount"] = 0
-		out["definedAliasCount"] = 0
-		out["definedCfgCount"] = 0
-	}
+	out["activeCfgName"] = activeCfgName
+	out["effectiveZoneCount"] = effectiveZoneCount
+	out["effectiveZoneNames"] = effectiveZoneNames
+	out["effectiveZoneCountResolved"] = effectiveZoneCountResolved
+	// Legacy alias
+	out["zoningActiveCfg"] = activeCfgName
 
 	// ── Raw data for investigation drill-down ──
 	out["_raw"] = map[string]interface{}{
