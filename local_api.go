@@ -17,6 +17,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 )
@@ -56,7 +57,12 @@ func NewLocalAPIServer(
 		supervisor: supervisor,
 		token:      token,
 		bind:       bind,
-		lanURL:     detectLANURL(bind),
+		lanURL: func() string {
+			if v := os.Getenv("FORGEAI_LOCAL_API_URL"); v != "" {
+				return v
+			}
+			return detectLANURL(bind)
+		}(),
 	}
 
 	mux := http.NewServeMux()
