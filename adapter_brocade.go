@@ -78,9 +78,10 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	ports, _ := a.brocadeGet("/rest/running/brocade-interface/fibrechannel")
 	media, _ := a.brocadeGet("/rest/running/brocade-media/media-rdp")
 	zoneConfig, _ := a.brocadeGet("/rest/running/brocade-zone/effective-configuration")
+	definedConfig, _ := a.brocadeGet("/rest/running/brocade-zone/defined-configuration")
 	fabricInfo, _ := a.brocadeGet("/rest/running/brocade-fabric/fabric-switch")
 
-	snapshotData := normalizeBrocadeSnapshot(chassis, switchInfo, ports, media, zoneConfig, fabricInfo)
+	snapshotData := normalizeBrocadeSnapshot(chassis, switchInfo, ports, media, zoneConfig, definedConfig, fabricInfo)
 
 	// Build alerts from normalized data
 	var alerts []map[string]interface{}
@@ -126,7 +127,7 @@ func (a *BrocadeAdapter) Close() error {
 // normalizeBrocadeSnapshot flattens raw FOS REST responses into
 // dashboard-ready fields expected by the frontend hook.
 func normalizeBrocadeSnapshot(
-	chassis, switchInfo, ports, media, zoneConfig, fabricInfo map[string]interface{},
+	chassis, switchInfo, ports, media, zoneConfig, definedConfig, fabricInfo map[string]interface{},
 ) map[string]interface{} {
 	out := map[string]interface{}{}
 
@@ -282,24 +283,35 @@ func normalizeBrocadeSnapshot(
 	fabricSwitches := brocadeExtractArray(fabricInfo, "fabric-switch")
 	out["fabricSwitchCount"] = len(fabricSwitches)
 
-	// ── Zoning ──
+	// ── Zoning (effective) ──
 	if ec := brocadeExtractFirst(zoneConfig, "effective-configuration"); ec != nil {
 		out["zoningActiveCfg"] = ec["cfg-name"]
-		if zones, ok := ec["zone"].([]interface{}); ok {
-			out["zoneCount"] = len(zones)
-		}
+		out["effectiveZoneCount"] = len(normalizeToSlice(ec["zone"]))
 	} else {
 		out["zoningActiveCfg"] = nil
+		out["effectiveZoneCount"] = 0
+	}
+
+	// ── Zoning (defined) ──
+	if dc := brocadeExtractFirst(definedConfig, "defined-configuration"); dc != nil {
+		out["definedZoneCount"] = len(normalizeToSlice(dc["zone"]))
+		out["definedAliasCount"] = len(normalizeToSlice(dc["alias"]))
+		out["definedCfgCount"] = len(normalizeToSlice(dc["cfg"]))
+	} else {
+		out["definedZoneCount"] = 0
+		out["definedAliasCount"] = 0
+		out["definedCfgCount"] = 0
 	}
 
 	// ── Raw data for investigation drill-down ──
 	out["_raw"] = map[string]interface{}{
-		"chassis":    chassis,
-		"switchInfo": switchInfo,
-		"ports":      ports,
-		"media":      media,
-		"zoneConfig": zoneConfig,
-		"fabric":     fabricInfo,
+		"chassis":       chassis,
+		"switchInfo":    switchInfo,
+		"ports":         ports,
+		"media":         media,
+		"zoneConfig":    zoneConfig,
+		"definedConfig": definedConfig,
+		"fabric":        fabricInfo,
 	}
 
 	return out
@@ -353,6 +365,20 @@ func (a *BrocadeAdapter) brocadeGet(path string) (map[string]interface{}, error)
 		return nil, err
 	}
 	return result, nil
+}
+
+// normalizeToSlice converts a value that may be a single object, an array,
+// or nil into a consistent []interface{}. Use throughout the Brocade adapter
+// to handle FOS responses that return single objects vs arrays.
+func normalizeToSlice(v interface{}) []interface{} {
+	if v == nil {
+		return nil
+	}
+	if arr, ok := v.([]interface{}); ok {
+		return arr
+	}
+	// Single object → wrap
+	return []interface{}{v}
 }
 
 // brocadeExtractArray extracts an array from Brocade's nested Response envelope.
