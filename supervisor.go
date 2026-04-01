@@ -25,6 +25,7 @@ type Supervisor struct {
 	uploadQueue   *UploadQueue           // shared upload queue (nil = inline)
 	localDB       *LocalDB               // hybrid mode local DB (nil = disabled)
 	localAPIURL   string                 // LAN URL for local API server
+	localAPIToken string                 // pre-shared token for local API
 	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
 	failedRetries map[string]int         // targetID -> consecutive retry count
 }
@@ -71,6 +72,20 @@ func (s *Supervisor) GetLocalAPIURL() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.localAPIURL
+}
+
+// SetLocalAPIToken stores the pre-shared local API token.
+func (s *Supervisor) SetLocalAPIToken(token string) {
+	s.mu.Lock()
+	s.localAPIToken = token
+	s.mu.Unlock()
+}
+
+// GetLocalAPIToken returns the local API token.
+func (s *Supervisor) GetLocalAPIToken() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.localAPIToken
 }
 
 // Initialize loads or creates host state, handles legacy migration.
@@ -279,7 +294,8 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 		HostToken:   s.state.Identity.ConnectorToken,
 		UploadQueue: s.uploadQueue,
 		LocalDB:     s.localDB,
-		LocalAPIURL: s.localAPIURL,
+		LocalAPIURL:   s.localAPIURL,
+		LocalAPIToken: s.localAPIToken,
 		OnStateChange: func(targetID string, status WorkerStatus) {
 			s.onWorkerStateChange(targetID, status)
 		},

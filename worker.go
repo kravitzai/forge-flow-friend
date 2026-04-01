@@ -36,7 +36,8 @@ type Worker struct {
 	localDB *LocalDB
 
 	// LAN URL for local API (empty = not advertised)
-	localAPIURL string
+	localAPIURL   string
+	localAPIToken string
 
 	// Callbacks
 	onStateChange func(targetID string, status WorkerStatus)
@@ -53,6 +54,7 @@ type WorkerConfig struct {
 	UploadQueue   *UploadQueue
 	LocalDB       *LocalDB
 	LocalAPIURL   string
+	LocalAPIToken string
 	OnStateChange func(targetID string, status WorkerStatus)
 }
 
@@ -72,6 +74,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		uploadQueue:   cfg.UploadQueue,
 		localDB:       cfg.LocalDB,
 		localAPIURL:   cfg.LocalAPIURL,
+		localAPIToken: cfg.LocalAPIToken,
 		onStateChange: cfg.OnStateChange,
 		state: WorkerState{
 			TargetID: cfg.Profile.TargetID,
@@ -434,6 +437,7 @@ func (w *Worker) sendHeartbeat() {
 	}
 	if w.localAPIURL != "" {
 		payload["localApiUrl"] = w.localAPIURL
+		payload["localApiToken"] = w.localAPIToken
 	}
 
 	if err := w.backend.Post(w.hostToken, payload); err != nil {

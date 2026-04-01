@@ -276,6 +276,7 @@ func main() {
 
 	if localAPI != nil {
 		supervisor.SetLocalAPIURL(localAPI.LANURL())
+		supervisor.SetLocalAPIToken(localAPIToken)
 	}
 
 	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
