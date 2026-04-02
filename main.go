@@ -158,6 +158,7 @@ func main() {
 	supervisor.RegisterAdapter("infiniband", NewInfiniBandAdapter)
 	supervisor.RegisterAdapter("bluefield", NewBlueFieldAdapter)
 	supervisor.RegisterAdapter("dell-idrac", NewIdracAdapter)
+	supervisor.RegisterAdapter("mikrotik", NewMikroTikAdapter)
 
 	// ── Enrollment / State Loading ──
 	enrollmentToken := os.Getenv("FORGEAI_ENROLLMENT_TOKEN")
