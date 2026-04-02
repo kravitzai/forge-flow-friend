@@ -135,7 +135,32 @@ func (a *OllamaAdapter) Collect() (map[string]interface{}, error) {
 		"snapshotData": snapshotData,
 		"alerts":       []map[string]interface{}{},
 		"collectedAt":  now,
+		"_signals":     extractOllamaSignals(snapshotData),
 	}, nil
+}
+
+// extractOllamaSignals mirrors frontend signal rules for Hybrid Mode rollup.
+func extractOllamaSignals(data map[string]interface{}) []SnapshotSignal {
+	var sigs []SnapshotSignal
+
+	if runtime, ok := data["runtime"].(map[string]interface{}); ok {
+		if healthy, ok := runtime["healthy"].(bool); ok && !healthy {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "runtime.unhealthy", Label: "Ollama runtime is unhealthy",
+				Severity: "critical",
+			})
+			return sigs
+		}
+	}
+
+	if models, ok := data["models"].([]interface{}); ok && len(models) == 0 {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "models.empty", Label: "No models installed",
+			Severity: "warning",
+		})
+	}
+
+	return sigs
 }
 
 // getNestedDetail extracts a field from the Ollama "details" sub-object.

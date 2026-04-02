@@ -143,7 +143,32 @@ func (a *OpenWebuiAdapter) Collect() (map[string]interface{}, error) {
 		"snapshotData": snapshotData,
 		"alerts":       []map[string]interface{}{},
 		"collectedAt":  now,
+		"_signals":     extractOpenWebuiSignals(snapshotData),
 	}, nil
+}
+
+// extractOpenWebuiSignals mirrors frontend signal rules for Hybrid Mode rollup.
+func extractOpenWebuiSignals(data map[string]interface{}) []SnapshotSignal {
+	var sigs []SnapshotSignal
+
+	if service, ok := data["service"].(map[string]interface{}); ok {
+		if healthy, ok := service["healthy"].(bool); ok && !healthy {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "service.unhealthy", Label: "Open WebUI service is unhealthy",
+				Severity: "critical",
+			})
+			return sigs
+		}
+	}
+
+	if models, ok := data["models"].([]map[string]interface{}); ok && len(models) == 0 {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "models.empty", Label: "No models available",
+			Severity: "warning",
+		})
+	}
+
+	return sigs
 }
 
 func (a *OpenWebuiAdapter) Capabilities() []string {

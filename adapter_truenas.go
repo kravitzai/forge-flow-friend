@@ -72,7 +72,59 @@ func (a *TrueNASAdapter) Collect() (map[string]interface{}, error) {
 		},
 		"alerts":      snapshot.Alerts,
 		"collectedAt": snapshot.CollectedAt,
+		"_signals":    extractTruenasSignals(snapshot.Pools, snapshot.ReplicationTasks),
 	}, nil
+}
+
+// extractTruenasSignals mirrors frontend signal rules for Hybrid Mode rollup.
+func extractTruenasSignals(pools []TrueNASPoolSnapshot, replTasks []TrueNASReplicationTask) []SnapshotSignal {
+	var sigs []SnapshotSignal
+
+	for _, p := range pools {
+		switch p.Status {
+		case "DEGRADED":
+			sigs = append(sigs, SnapshotSignal{
+				Key: "pool.degraded", Label: fmt.Sprintf("Pool %s is degraded", p.Name),
+				Entity: p.Name, Severity: "error",
+			})
+		case "FAULTED", "OFFLINE", "REMOVED", "UNAVAIL":
+			sigs = append(sigs, SnapshotSignal{
+				Key: "pool.faulted", Label: fmt.Sprintf("Pool %s is faulted", p.Name),
+				Entity: p.Name, Severity: "critical",
+			})
+		}
+		if p.ResilverInProgress {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "pool.resilvering", Label: fmt.Sprintf("Pool %s resilver in progress", p.Name),
+				Entity: p.Name, Severity: "warning",
+			})
+		}
+		if p.CapacityBytes != nil && p.UsedBytes != nil && *p.CapacityBytes > 0 {
+			pct := int(float64(*p.UsedBytes) / float64(*p.CapacityBytes) * 100)
+			if pct >= 80 {
+				sigs = append(sigs, SnapshotSignal{
+					Key: "pool.high-usage",
+					Label: fmt.Sprintf("Pool %s at %d%% capacity", p.Name, pct),
+					Entity: p.Name, Value: fmt.Sprintf("%d", pct), Severity: "warning",
+				})
+			}
+		}
+	}
+
+	for _, r := range replTasks {
+		if !r.Enabled {
+			continue
+		}
+		if r.LastRunOK != nil && !*r.LastRunOK {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "replication.failed",
+				Label: fmt.Sprintf("Replication task %q failed", r.Name),
+				Entity: r.Name, Severity: "error",
+			})
+		}
+	}
+
+	return sigs
 }
 
 func (a *TrueNASAdapter) Capabilities() []string {

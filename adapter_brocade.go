@@ -98,7 +98,53 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 		"snapshotData": snapshotData,
 		"alerts":       alerts,
 		"collectedAt":  now,
+		"_signals":     extractBrocadeSignals(snapshotData),
 	}, nil
+}
+
+// extractBrocadeSignals mirrors frontend signal rules for Hybrid Mode rollup.
+func extractBrocadeSignals(data map[string]interface{}) []SnapshotSignal {
+	var sigs []SnapshotSignal
+
+	if switchInfo, ok := data["switchState"].(string); ok {
+		if switchInfo != "" && switchInfo != "Online" && switchInfo != "online" {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "switch.unhealthy", Label: fmt.Sprintf("Switch state: %s", switchInfo),
+				Value: switchInfo, Severity: "error",
+			})
+		}
+	}
+
+	if ports, ok := data["ports"].(map[string]interface{}); ok {
+		disabled := toInt(ports["disabled"])
+		if disabled > 0 {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "port.disabled", Label: fmt.Sprintf("%d port(s) disabled", disabled),
+				Value: fmt.Sprintf("%d", disabled), Severity: "warning",
+			})
+		}
+		errPorts := toInt(ports["withErrors"])
+		if errPorts > 0 {
+			sev := "warning"
+			if errPorts > 3 {
+				sev = "error"
+			}
+			sigs = append(sigs, SnapshotSignal{
+				Key: "port.errors", Label: fmt.Sprintf("%d port(s) with errors", errPorts),
+				Value: fmt.Sprintf("%d", errPorts), Severity: sev,
+			})
+		}
+	}
+
+	sfpWarn := toInt(data["sfpWarnings"])
+	if sfpWarn > 0 {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "sfp.warning", Label: fmt.Sprintf("%d SFP warning(s)", sfpWarn),
+			Value: fmt.Sprintf("%d", sfpWarn), Severity: "warning",
+		})
+	}
+
+	return sigs
 }
 
 func (a *BrocadeAdapter) Capabilities() []string {
@@ -511,4 +557,17 @@ func isConnRefused(err error) bool {
 		return opErr.Op == "dial" && strings.Contains(opErr.Err.Error(), "connection refused")
 	}
 	return strings.Contains(err.Error(), "connection refused")
+}
+
+// toInt extracts an int from an interface{} that may be int, float64, or int64.
+func toInt(v interface{}) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case float64:
+		return int(n)
+	case int64:
+		return int(n)
+	}
+	return 0
 }

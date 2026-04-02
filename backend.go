@@ -52,7 +52,7 @@ func NewBackendClient(baseURL string) *BackendClient {
 	}
 	return &BackendClient{
 		BaseURL: baseURL,
-		client:  NewHTTPClient(nil, nil, 15*time.Second),
+		client:  NewHTTPClient(nil, nil, 30*time.Second),
 	}
 }
 

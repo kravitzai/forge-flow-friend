@@ -76,7 +76,97 @@ func (a *IdracAdapter) Collect() (map[string]interface{}, error) {
 		"snapshotData": snapshotData,
 		"alerts":       alertList,
 		"collectedAt":  now,
+		"_signals":     extractIdracSignals(snapshotData),
 	}, nil
+}
+
+// extractIdracSignals mirrors frontend signal rules for Hybrid Mode rollup.
+func extractIdracSignals(data map[string]interface{}) []SnapshotSignal {
+	var sigs []SnapshotSignal
+
+	if h, _ := data["health"].(string); h != "" && h != "OK" {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "health.degraded", Label: "System health degraded",
+			Value: h, Severity: "warning",
+		})
+	}
+
+	if p, _ := data["powerState"].(string); p != "" && p != "On" {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "power.off", Label: "Server powered off",
+			Value: p, Severity: "warning",
+		})
+	}
+
+	// temperatures is []map[string]interface{} from normalizeIdracSnapshot
+	if temps, ok := data["temperatures"].([]map[string]interface{}); ok {
+		hot := 0
+		for _, m := range temps {
+			r, _ := m["readingCelsius"].(float64)
+			th, _ := m["threshold"].(float64)
+			if th > 0 && r >= th*0.9 {
+				hot++
+			}
+		}
+		if hot > 0 {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "thermal.warning", Label: "Thermal sensors near threshold",
+				Value: fmt.Sprintf("%d sensor(s)", hot), Severity: "warning",
+			})
+		}
+	}
+
+	// psuHealth is []string from normalizeIdracSnapshot
+	if psus, ok := data["psuHealth"].([]string); ok {
+		faulted := 0
+		for _, s := range psus {
+			if s != "OK" {
+				faulted++
+			}
+		}
+		if faulted > 0 {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "psu.fault", Label: "PSU fault detected",
+				Value: fmt.Sprintf("%d PSU(s)", faulted), Severity: "error",
+			})
+		}
+	}
+
+	// selEntries is []map[string]interface{} from normalizeIdracSnapshot
+	if sel, ok := data["selEntries"].([]map[string]interface{}); ok {
+		critical := 0
+		for _, m := range sel {
+			sev, _ := m["severity"].(string)
+			if sev == "Critical" || sev == "Error" {
+				critical++
+			}
+		}
+		if critical > 0 {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "sel.critical", Label: "Critical SEL events",
+				Value: fmt.Sprintf("%d event(s)", critical), Severity: "error",
+			})
+		}
+	}
+
+	// memoryModules is []map[string]interface{} from normalizeIdracSnapshot
+	if mods, ok := data["memoryModules"].([]map[string]interface{}); ok {
+		bad := 0
+		for _, mm := range mods {
+			h, _ := mm["health"].(string)
+			if h != "" && h != "OK" {
+				bad++
+			}
+		}
+		if bad > 0 {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "dimm.fault", Label: "DIMM fault detected",
+				Value: fmt.Sprintf("%d DIMM(s)", bad), Severity: "error",
+			})
+		}
+	}
+
+	return sigs
 }
 
 func (a *IdracAdapter) Capabilities() []string {

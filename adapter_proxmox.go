@@ -100,7 +100,64 @@ func (a *ProxmoxAdapter) Collect() (map[string]interface{}, error) {
 		},
 		"alerts":      snapshot.Alerts,
 		"collectedAt": snapshot.CollectedAt,
+		"_signals":    extractProxmoxSignals(snapshot.Nodes, snapshot.Cluster),
 	}, nil
+}
+
+// extractProxmoxSignals mirrors frontend signal rules for Hybrid Mode rollup.
+func extractProxmoxSignals(nodes []NodeSnapshot, cluster *ClusterSnapshot) []SnapshotSignal {
+	var sigs []SnapshotSignal
+
+	if cluster != nil && !cluster.Quorate {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "cluster.no-quorum", Label: "Cluster has lost quorum",
+			Severity: "critical",
+		})
+	}
+
+	if cluster != nil {
+		for _, cn := range cluster.Nodes {
+			if !cn.Online {
+				sigs = append(sigs, SnapshotSignal{
+					Key: "cluster.node-offline",
+					Label: fmt.Sprintf("Cluster node %s offline", cn.Name),
+					Entity: cn.Name, Severity: "error",
+				})
+			}
+		}
+	}
+
+	for _, n := range nodes {
+		if n.Status != "online" {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "node.offline",
+				Label: fmt.Sprintf("Node %s is offline", n.Name),
+				Entity: n.Name, Severity: "error",
+			})
+			continue
+		}
+		if n.CPU != nil && *n.CPU > 0.9 {
+			sigs = append(sigs, SnapshotSignal{
+				Key: "node.high-cpu",
+				Label: fmt.Sprintf("Node %s CPU > 90%%", n.Name),
+				Entity: n.Name, Value: fmt.Sprintf("%.0f%%", *n.CPU*100),
+				Severity: "warning",
+			})
+		}
+		if n.MemoryUsed != nil && n.MemoryTotal != nil && *n.MemoryTotal > 0 {
+			pct := float64(*n.MemoryUsed) / float64(*n.MemoryTotal)
+			if pct > 0.9 {
+				sigs = append(sigs, SnapshotSignal{
+					Key: "node.high-memory",
+					Label: fmt.Sprintf("Node %s memory > 90%%", n.Name),
+					Entity: n.Name, Value: fmt.Sprintf("%.0f%%", pct*100),
+					Severity: "warning",
+				})
+			}
+		}
+	}
+
+	return sigs
 }
 
 func (a *ProxmoxAdapter) Capabilities() []string {
