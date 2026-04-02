@@ -326,6 +326,41 @@ func (d *LocalDB) MarkLegacySynced(
 	return n, nil
 }
 
+// GetSnapshotSummary returns the pre-computed
+// SnapshotSummary for a given snapshot ID,
+// read from the summary_json column (written during
+// WriteSnapshot). Returns nil if no summary exists.
+func (d *LocalDB) GetSnapshotSummary(
+	snapshotID string,
+) (*SnapshotSummary, error) {
+	if d == nil || !d.enabled {
+		return nil, nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	var raw sql.NullString
+	err := d.db.QueryRow(`
+		SELECT summary_json FROM snapshots
+		WHERE id = ?
+	`, snapshotID).Scan(&raw)
+	if err != nil || !raw.Valid || raw.String == "" {
+		return nil, err
+	}
+
+	var summary SnapshotSummary
+	if err := json.Unmarshal([]byte(raw.String), &summary); err != nil {
+		return nil, fmt.Errorf("local_db: unmarshal summary: %w", err)
+	}
+
+	if summary.SignalCount == 0 {
+		return nil, nil
+	}
+
+	return &summary, nil
+}
+
 // ── Retention ──
 
 // RunRetention deletes snapshots older than maxAgeDays.
