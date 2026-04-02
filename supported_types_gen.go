@@ -19,6 +19,7 @@ var SupportedTargetTypes = []string{
 	"infiniband",
 	"kubernetes",
 	"linux",
+	"mikrotik",
 	"ndfc",
 	"netapp-ontap",
 	"nexus",
