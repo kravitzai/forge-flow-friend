@@ -150,6 +150,12 @@ func (w *Worker) run() {
 
 	// Initialize adapter
 	if err := w.adapter.Init(w.profile, w.creds); err != nil {
+		w.mu.Lock()
+		w.state.ConsecutiveErrors = 1
+		w.state.LastErrorAt = time.Now()
+		w.state.LastError = err.Error()
+		w.mu.Unlock()
+
 		audit.Error("adapter.init_failed", "Adapter init failed",
 			append(w.targetFields(), Err(err))...)
 		w.setStatus(WorkerStatusFailed)

@@ -13,7 +13,10 @@
 package main
 
 import (
-	"crypto/tls"
+	"crypto/md5"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -35,6 +38,8 @@ type MikroTikSwOSAdapter struct {
 	snmpTarget string // optional SNMP augmentation target
 }
 
+var digestAuthParamRe = regexp.MustCompile(`(\w+)=("([^"]*)"|[^,]+)`)
+
 func NewMikroTikSwOSAdapter(profile *TargetProfile) (TargetAdapter, error) {
 	return &MikroTikSwOSAdapter{profile: profile}, nil
 }
@@ -55,17 +60,12 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 	}
 
 	jar, _ := cookiejar.New(nil)
-	a.client = &http.Client{
-		Timeout: timeout,
-		Jar:     jar,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: profile.TLS.InsecureSkipVerify,
-			},
-		},
-	}
+	a.client = NewHTTPClientFromProfile(profile, timeout)
+	a.client.Jar = jar
 
-	// Authenticate via SwOS login
+	// Authenticate by probing a real SwOS data page.
+	// SwOS models use HTTP auth (Digest on many versions, Basic on some),
+	// not the old form POST flow.
 	log.Printf("[mikrotik-swos:%s] Authenticating to SwOS at %s...", profile.Name, a.baseURL)
 	err := a.swosLogin()
 	if err != nil {
@@ -75,6 +75,7 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 			log.Printf("[mikrotik-swos:%s] HTTPS failed, trying HTTP at %s...", profile.Name, httpURL)
 			a.baseURL = httpURL
 			jar2, _ := cookiejar.New(nil)
+			a.client = NewHTTPClientFromProfile(profile, timeout)
 			a.client.Jar = jar2
 			err2 := a.swosLogin()
 			if err2 != nil {
@@ -90,48 +91,190 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 	return nil
 }
 
-// swosLogin authenticates to the SwOS web UI
+// swosLogin authenticates to the SwOS web UI by probing a real data page.
 func (a *MikroTikSwOSAdapter) swosLogin() error {
-	loginURL := a.baseURL + "/"
-	payload := fmt.Sprintf("usr=%s&pwd=%s", a.user, a.pass)
-	resp, err := a.client.Post(loginURL, "application/x-www-form-urlencoded", strings.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("login request failed: %w", err)
+	if _, err := a.swosGet("/!dhost.b"); err == nil {
+		return nil
+	} else {
+		if _, legacyErr := a.swosGet("/sys.b"); legacyErr == nil {
+			return nil
+		} else {
+			return fmt.Errorf("system page auth probe failed: primary=%v; legacy=%v", err, legacyErr)
+		}
 	}
-	defer resp.Body.Close()
-	io.ReadAll(resp.Body)
-
-	// SwOS returns 200 with a session cookie on success
-	if resp.StatusCode != 200 && resp.StatusCode != 302 {
-		return fmt.Errorf("login returned HTTP %d", resp.StatusCode)
-	}
-
-	// Verify session by fetching system page
-	_, verifyErr := a.swosGet("/!dhost.b")
-	if verifyErr != nil {
-		return fmt.Errorf("session verification failed: %w", verifyErr)
-	}
-
-	return nil
 }
 
-// swosGet fetches a SwOS internal page
+// swosGet fetches a SwOS internal page using the device's native HTTP auth.
 func (a *MikroTikSwOSAdapter) swosGet(path string) ([]byte, error) {
-	url := a.baseURL + path
-	resp, err := a.client.Get(url)
+	return a.swosRequest(http.MethodGet, path, nil, "")
+}
+
+func (a *MikroTikSwOSAdapter) swosRequest(method, path string, body []byte, contentType string) ([]byte, error) {
+	resp, err := a.doSwOSRequest(method, path, body, contentType, "")
 	if err != nil {
-		return nil, fmt.Errorf("GET %s: %w", path, err)
+		return nil, fmt.Errorf("%s %s: %w", method, path, err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		challenge := resp.Header.Get("Www-Authenticate")
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		authHeader, scheme, authErr := buildSwOSAuthHeader(challenge, method, path, a.user, a.pass)
+		if authErr != nil {
+			return nil, fmt.Errorf("%s %s: auth challenge unsupported: %w", method, path, authErr)
+		}
+		log.Printf("[mikrotik-swos:%s] Retrying %s with %s auth", a.profile.Name, path, scheme)
+
+		resp, err = a.doSwOSRequest(method, path, body, contentType, authHeader)
+		if err != nil {
+			return nil, fmt.Errorf("%s %s retry: %w", method, path, err)
+		}
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(resp.Body)
 
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
-	if resp.StatusCode != 200 {
+	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
-	return body, nil
+	return respBody, nil
+}
+
+func (a *MikroTikSwOSAdapter) doSwOSRequest(method, path string, body []byte, contentType, authHeader string) (*http.Response, error) {
+	var bodyReader io.Reader
+	if body != nil {
+		bodyReader = strings.NewReader(string(body))
+	}
+
+	req, err := http.NewRequest(method, a.baseURL+path, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
+	}
+	if authHeader != "" {
+		req.Header.Set("Authorization", authHeader)
+	}
+	return a.client.Do(req)
+}
+
+func buildSwOSAuthHeader(challenge, method, uri, username, password string) (string, string, error) {
+	lowerChallenge := strings.ToLower(challenge)
+	if strings.Contains(lowerChallenge, "digest") {
+		header, err := buildDigestAuthHeader(challenge, method, uri, username, password)
+		return header, "digest", err
+	}
+	if strings.Contains(lowerChallenge, "basic") || challenge == "" {
+		if username == "" {
+			return "", "", fmt.Errorf("basic auth requested but username is empty")
+		}
+		token := base64.StdEncoding.EncodeToString([]byte(username + ":" + password))
+		return "Basic " + token, "basic", nil
+	}
+	return "", "", fmt.Errorf("unsupported WWW-Authenticate challenge: %q", challenge)
+}
+
+func buildDigestAuthHeader(challenge, method, uri, username, password string) (string, error) {
+	params := parseDigestAuthParams(challenge)
+	realm := params["realm"]
+	nonce := params["nonce"]
+	if realm == "" || nonce == "" {
+		return "", fmt.Errorf("missing realm/nonce in digest challenge")
+	}
+
+	cnonce, err := randomHex(8)
+	if err != nil {
+		return "", err
+	}
+
+	algorithm := strings.ToLower(params["algorithm"])
+	ha1 := md5Hex(fmt.Sprintf("%s:%s:%s", username, realm, password))
+	if algorithm == "md5-sess" {
+		ha1 = md5Hex(fmt.Sprintf("%s:%s:%s", ha1, nonce, cnonce))
+	} else if algorithm != "" && algorithm != "md5" {
+		return "", fmt.Errorf("unsupported digest algorithm %q", params["algorithm"])
+	}
+
+	ha2 := md5Hex(fmt.Sprintf("%s:%s", method, uri))
+	nc := "00000001"
+	qop := ""
+	if rawQop := params["qop"]; rawQop != "" {
+		for _, option := range strings.Split(rawQop, ",") {
+			candidate := strings.TrimSpace(strings.Trim(option, `"`))
+			if candidate == "auth" {
+				qop = candidate
+				break
+			}
+			if qop == "" {
+				qop = candidate
+			}
+		}
+	}
+
+	response := ""
+	if qop != "" {
+		response = md5Hex(fmt.Sprintf("%s:%s:%s:%s:%s:%s", ha1, nonce, nc, cnonce, qop, ha2))
+	} else {
+		response = md5Hex(fmt.Sprintf("%s:%s:%s", ha1, nonce, ha2))
+	}
+
+	parts := []string{
+		fmt.Sprintf(`Digest username="%s"`, username),
+		fmt.Sprintf(`realm="%s"`, realm),
+		fmt.Sprintf(`nonce="%s"`, nonce),
+		fmt.Sprintf(`uri="%s"`, uri),
+		fmt.Sprintf(`response="%s"`, response),
+	}
+	if opaque := params["opaque"]; opaque != "" {
+		parts = append(parts, fmt.Sprintf(`opaque="%s"`, opaque))
+	}
+	if params["algorithm"] != "" {
+		parts = append(parts, fmt.Sprintf("algorithm=%s", params["algorithm"]))
+	}
+	if qop != "" {
+		parts = append(parts,
+			fmt.Sprintf("qop=%s", qop),
+			fmt.Sprintf("nc=%s", nc),
+			fmt.Sprintf(`cnonce="%s"`, cnonce),
+		)
+	}
+
+	return strings.Join(parts, ", "), nil
+}
+
+func parseDigestAuthParams(challenge string) map[string]string {
+	challenge = strings.TrimSpace(challenge)
+	if strings.HasPrefix(strings.ToLower(challenge), "digest ") {
+		challenge = challenge[len("Digest "):]
+	}
+
+	params := make(map[string]string)
+	for _, match := range digestAuthParamRe.FindAllStringSubmatch(challenge, -1) {
+		if len(match) < 2 {
+			continue
+		}
+		value := strings.TrimSpace(match[2])
+		value = strings.Trim(value, `"`)
+		params[strings.ToLower(match[1])] = value
+	}
+	return params
+}
+
+func md5Hex(value string) string {
+	sum := md5.Sum([]byte(value))
+	return hex.EncodeToString(sum[:])
+}
+
+func randomHex(size int) (string, error) {
+	buf := make([]byte, size)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
 }
 
 func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
