@@ -427,18 +427,18 @@ func buildSummary(signals []SnapshotSignal) SnapshotSummary {
 		s.Verdict = "healthy"
 	}
 
-	// Top signals: up to 5, errors first then warnings.
-	top := make([]SnapshotSignal, 0, 5)
+	// Top signals: up to 10, errors first then warnings.
+	top := make([]SnapshotSignal, 0, 10)
 	for _, sig := range signals {
 		if sig.Severity == "critical" || sig.Severity == "error" {
 			top = append(top, sig)
-			if len(top) >= 5 {
+			if len(top) >= 10 {
 				break
 			}
 		}
 	}
 	for _, sig := range signals {
-		if len(top) >= 5 {
+		if len(top) >= 10 {
 			break
 		}
 		if sig.Severity == "warning" {
