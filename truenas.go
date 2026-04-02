@@ -119,6 +119,9 @@ func NewTrueNASClient(cfg *Config) *TrueNASClient {
 	if cfg.TimeoutSecs > 0 {
 		timeout = time.Duration(cfg.TimeoutSecs) * time.Second
 	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
 	tlsCfg := &TLSConfig{InsecureSkipVerify: cfg.InsecureSkipVerify}
 	return &TrueNASClient{
 		cfg:        cfg,

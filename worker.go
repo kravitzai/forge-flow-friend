@@ -168,8 +168,25 @@ func (w *Worker) run() {
 	// Send initial heartbeat
 	w.sendHeartbeat()
 
-	// Collect immediately
-	w.collect()
+	// Collect immediately (with watchdog)
+	initialDone := make(chan struct{})
+	go func() {
+		defer close(initialDone)
+		w.collect()
+	}()
+	initialWatchdog := time.Duration(w.policy.WatchdogTimeoutSecs) * time.Second
+	if initialWatchdog <= 0 {
+		initialWatchdog = 300 * time.Second
+	}
+	select {
+	case <-initialDone:
+	case <-time.After(initialWatchdog):
+		audit.Warn("worker.watchdog",
+			"Initial collection hung — watchdog fired",
+			w.targetFields()...)
+	case <-w.ctx.Done():
+		return
+	}
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -187,7 +204,36 @@ func (w *Worker) run() {
 			if w.profile.Paused {
 				continue
 			}
-			w.collect()
+			// Run collect with watchdog timeout.
+			// If adapter hangs (e.g. network dropped),
+			// cancel it after WatchdogTimeoutSecs.
+			watchdog := time.Duration(w.policy.WatchdogTimeoutSecs) * time.Second
+			if watchdog <= 0 {
+				watchdog = 300 * time.Second
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				w.collect()
+			}()
+			select {
+			case <-done:
+				// Normal completion
+			case <-time.After(watchdog):
+				audit.Warn("worker.watchdog",
+					"Collection hung — watchdog fired, restarting worker",
+					append(w.targetFields(),
+						F("watchdog_secs", w.policy.WatchdogTimeoutSecs))...)
+				w.handleError(fmt.Errorf(
+					"collection watchdog timeout after %v", watchdog))
+				w.sendHeartbeat()
+				// Restart the worker to get a fresh
+				// HTTP client and clean state
+				go w.Restart()
+				return
+			case <-w.ctx.Done():
+				return
+			}
 		}
 	}
 }

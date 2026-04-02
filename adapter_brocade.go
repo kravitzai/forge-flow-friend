@@ -39,6 +39,9 @@ func (a *BrocadeAdapter) Init(profile *TargetProfile, creds map[string]string) e
 	if profile.ResourceLimits.TimeoutSecs > 0 {
 		timeout = time.Duration(profile.ResourceLimits.TimeoutSecs) * time.Second
 	}
+	if timeout > 30*time.Second {
+		timeout = 30 * time.Second
+	}
 	a.client = NewHTTPClientFromProfile(profile, timeout)
 
 	a.user = creds["username"]
