@@ -100,13 +100,16 @@ func NewLocalAPIServer(
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/health",
-		s.ipAllowedMiddleware(s.handleHealth))
+		s.preflightMiddleware(
+			s.ipAllowedMiddleware(s.handleHealth)))
 	mux.HandleFunc("/v1/targets",
-		s.ipAllowedMiddleware(
-			s.authMiddleware(s.handleTargets)))
+		s.preflightMiddleware(
+			s.ipAllowedMiddleware(
+				s.authMiddleware(s.handleTargets))))
 	mux.HandleFunc("/v1/targets/",
-		s.ipAllowedMiddleware(
-			s.authMiddleware(s.handleTargetRoute)))
+		s.preflightMiddleware(
+			s.ipAllowedMiddleware(
+				s.authMiddleware(s.handleTargetRoute))))
 
 	s.server = &http.Server{
 		Addr:         bind,
@@ -375,8 +378,6 @@ func (s *LocalAPIServer) handleHealth(
 			"method not allowed")
 		return
 	}
-	s.setCORS(w)
-
 	state := s.supervisor.GetState()
 	label := ""
 	if state != nil {
@@ -407,8 +408,6 @@ func (s *LocalAPIServer) handleTargets(
 			"method not allowed")
 		return
 	}
-	s.setCORS(w)
-
 	state := s.supervisor.GetState()
 	if state == nil {
 		s.writeJSON(w, http.StatusOK,
@@ -443,8 +442,6 @@ func (s *LocalAPIServer) handleTargetRoute(
 			"method not allowed")
 		return
 	}
-	s.setCORS(w)
-
 	// Parse: /v1/targets/<id>/<action>
 	parts := strings.Split(
 		strings.TrimPrefix(r.URL.Path, "/v1/targets/"), "/")
@@ -512,14 +509,40 @@ func (s *LocalAPIServer) writeJSON(
 func (s *LocalAPIServer) writeError(
 	w http.ResponseWriter, status int, msg string,
 ) {
+	s.corsHeaders(w)
 	s.writeJSON(w, status,
 		map[string]interface{}{"ok": false, "error": msg})
 }
 
-func (s *LocalAPIServer) setCORS(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Headers",
+// corsHeaders sets all required CORS headers on any response.
+func (s *LocalAPIServer) corsHeaders(
+	w http.ResponseWriter) {
+	w.Header().Set(
+		"Access-Control-Allow-Origin", "*")
+	w.Header().Set(
+		"Access-Control-Allow-Methods",
+		"GET, OPTIONS")
+	w.Header().Set(
+		"Access-Control-Allow-Headers",
 		"X-Local-Token, Content-Type")
+	w.Header().Set(
+		"Access-Control-Max-Age", "86400")
+}
+
+// preflightMiddleware short-circuits OPTIONS requests
+// before IP allowlist and auth middleware run.
+func (s *LocalAPIServer) preflightMiddleware(
+	next http.HandlerFunc,
+) http.HandlerFunc {
+	return func(
+		w http.ResponseWriter, r *http.Request) {
+		s.corsHeaders(w)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next(w, r)
+	}
 }
 
 // parseAllowedCIDRs parses a comma-separated list of
