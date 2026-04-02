@@ -84,14 +84,13 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	zoneConfig, _ := a.brocadeGet("/rest/running/brocade-zone/effective-configuration")
 	definedConfig, _ := a.brocadeGet("/rest/running/brocade-zone/defined-configuration")
 	fabricInfo, _ := a.brocadeGet("/rest/running/brocade-fabric/fabric-switch")
+	// FRU: fetch blade + power-supply separately, then merge.
+	// Many FOS versions split PSUs onto /power-supply while /blade only has blades+fans.
 	fru, _ := a.brocadeGet("/rest/running/brocade-fru/fru")
 	if fru == nil {
-		// FOS v8.x uses /blade endpoint
-		fru, _ = a.brocadeGet("/rest/running/brocade-fru/blade")
-	}
-	if fru == nil {
-		// Try power-supply directly
-		fru, _ = a.brocadeGet("/rest/running/brocade-fru/power-supply")
+		bladeFru, _ := a.brocadeGet("/rest/running/brocade-fru/blade")
+		psFru, _ := a.brocadeGet("/rest/running/brocade-fru/power-supply")
+		fru = mergeBrocadeFru(bladeFru, psFru)
 	}
 
 	snapshotData := normalizeBrocadeSnapshot(chassis, switchInfo, ports, media, zoneConfig, definedConfig, fabricInfo, fru)
@@ -107,10 +106,7 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	}
 	if raw, ok := snapshotData["_raw"].(map[string]interface{}); ok {
 		if fruRaw, ok := raw["fru"].(map[string]interface{}); ok {
-			fruItems := brocadeExtractArray(fruRaw, "fru")
-			if len(fruItems) == 0 {
-				fruItems = brocadeExtractArray(fruRaw, "blade")
-			}
+			fruItems := brocadeExtractFruItems(fruRaw)
 			psuCount := 0
 			failedPsus := 0
 			for _, item := range fruItems {
@@ -142,13 +138,17 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 		}
 	}
 
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"capabilities": a.Capabilities(),
 		"snapshotData": snapshotData,
 		"alerts":       alerts,
 		"collectedAt":  now,
 		"_signals":     extractBrocadeSignals(snapshotData),
-	}, nil
+	}
+	if sigs, ok := result["_signals"].([]SnapshotSignal); ok {
+		log.Printf("[brocade:%s] Emitting %d signals for cloud rollup", a.profile.Name, len(sigs))
+	}
+	return result, nil
 }
 
 // extractBrocadeSignals mirrors frontend signal rules for Hybrid Mode rollup.
@@ -246,10 +246,7 @@ func extractBrocadeSignals(data map[string]interface{}) []SnapshotSignal {
 		}
 
 		if fruRaw, ok := raw["fru"].(map[string]interface{}); ok {
-			fruItems := brocadeExtractArray(fruRaw, "fru")
-			if len(fruItems) == 0 {
-				fruItems = brocadeExtractArray(fruRaw, "blade")
-			}
+			fruItems := brocadeExtractFruItems(fruRaw)
 			psuCount := 0
 			failedPsus := 0
 			failedFans := 0
@@ -873,4 +870,43 @@ func toInt(v interface{}) int {
 		return int(n)
 	}
 	return 0
+}
+
+// mergeBrocadeFru combines results from /blade and /power-supply endpoints
+// into a single {"fru": [...all items...]} structure.
+func mergeBrocadeFru(blade, ps map[string]interface{}) map[string]interface{} {
+	if blade == nil && ps == nil {
+		return nil
+	}
+	var all []interface{}
+	if blade != nil {
+		for _, key := range []string{"blade", "fru"} {
+			if items := brocadeExtractArray(blade, key); len(items) > 0 {
+				all = append(all, items...)
+				break
+			}
+		}
+	}
+	if ps != nil {
+		for _, key := range []string{"power-supply", "fru"} {
+			if items := brocadeExtractArray(ps, key); len(items) > 0 {
+				all = append(all, items...)
+				break
+			}
+		}
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	return map[string]interface{}{"Response": map[string]interface{}{"fru": all}}
+}
+
+// brocadeExtractFruItems tries all known FRU keys in order.
+func brocadeExtractFruItems(fruRaw map[string]interface{}) []interface{} {
+	for _, key := range []string{"fru", "blade", "power-supply"} {
+		if items := brocadeExtractArray(fruRaw, key); len(items) > 0 {
+			return items
+		}
+	}
+	return nil
 }
