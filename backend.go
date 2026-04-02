@@ -95,7 +95,7 @@ func (b *BackendClient) Post(token string, payload map[string]interface{}) error
 // FetchDesiredState retrieves the desired target profile state from the backend.
 // Returns nil payload (not error) if backend returns 204 (no changes).
 // capManifestJSON is optional — if non-empty, sent as X-Host-Capabilities header.
-func (b *BackendClient) FetchDesiredState(token string, capManifestJSON ...string) (*DesiredStatePayload, error) {
+func (b *BackendClient) FetchDesiredState(token string, capManifestJSON string, hostPublicKey string) (*DesiredStatePayload, error) {
 	url := b.BaseURL + defaultDesiredStatePath
 
 	req, err := http.NewRequest("GET", url, nil)
@@ -107,8 +107,13 @@ func (b *BackendClient) FetchDesiredState(token string, capManifestJSON ...strin
 	req.Header.Set("Accept", "application/json")
 
 	// Include capability manifest if provided
-	if len(capManifestJSON) > 0 && capManifestJSON[0] != "" {
-		req.Header.Set("X-Host-Capabilities", capManifestJSON[0])
+	if capManifestJSON != "" {
+		req.Header.Set("X-Host-Capabilities", capManifestJSON)
+	}
+
+	// Include host public key for self-healing registration
+	if hostPublicKey != "" {
+		req.Header.Set("X-Host-Public-Key", hostPublicKey)
 	}
 
 	resp, err := b.client.Do(req)

@@ -238,7 +238,12 @@ func (sm *SyncManager) fetchAndReconcile() {
 	manifest := sm.supervisor.BuildCapabilityManifest()
 	manifestJSON, _ := json.Marshal(manifest)
 
-	payload, err := sm.backend.FetchDesiredState(token, string(manifestJSON))
+	pubKey := ""
+	if sm.hostKeyPair != nil {
+		pubKey = sm.hostKeyPair.PublicKeyBase64()
+	}
+
+	payload, err := sm.backend.FetchDesiredState(token, string(manifestJSON), pubKey)
 	if err != nil {
 		audit.Error("sync.error", "Desired-state fetch failed", Err(err))
 
