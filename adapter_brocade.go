@@ -84,13 +84,14 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	zoneConfig, _ := a.brocadeGet("/rest/running/brocade-zone/effective-configuration")
 	definedConfig, _ := a.brocadeGet("/rest/running/brocade-zone/defined-configuration")
 	fabricInfo, _ := a.brocadeGet("/rest/running/brocade-fabric/fabric-switch")
-	// FRU: fetch blade + power-supply separately, then merge.
-	// Many FOS versions split PSUs onto /power-supply while /blade only has blades+fans.
-	fru, _ := a.brocadeGet("/rest/running/brocade-fru/fru")
+	// FRU: always try blade + power-supply first — /fru on many FOS versions
+	// returns blades only, silently dropping PSU data.
+	bladeFru, _ := a.brocadeGet("/rest/running/brocade-fru/blade")
+	psFru, _ := a.brocadeGet("/rest/running/brocade-fru/power-supply")
+	fru := mergeBrocadeFru(bladeFru, psFru)
 	if fru == nil {
-		bladeFru, _ := a.brocadeGet("/rest/running/brocade-fru/blade")
-		psFru, _ := a.brocadeGet("/rest/running/brocade-fru/power-supply")
-		fru = mergeBrocadeFru(bladeFru, psFru)
+		// Fallback: older FOS single endpoint
+		fru, _ = a.brocadeGet("/rest/running/brocade-fru/fru")
 	}
 
 	snapshotData := normalizeBrocadeSnapshot(chassis, switchInfo, ports, media, zoneConfig, definedConfig, fabricInfo, fru)
@@ -147,6 +148,9 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	}
 	if sigs, ok := result["_signals"].([]SnapshotSignal); ok {
 		log.Printf("[brocade:%s] Emitting %d signals for cloud rollup", a.profile.Name, len(sigs))
+		for i, s := range sigs {
+			log.Printf("[brocade:%s]   signal[%d] key=%s sev=%s label=%s", a.profile.Name, i, s.Key, s.Severity, s.Label)
+		}
 	}
 	return result, nil
 }
@@ -155,13 +159,19 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 func extractBrocadeSignals(data map[string]interface{}) []SnapshotSignal {
 	var sigs []SnapshotSignal
 
-	if switchState, ok := data["switchState"].(string); ok {
-		if switchState != "" && !strings.EqualFold(switchState, "online") {
-			sigs = append(sigs, SnapshotSignal{
-				Key: "switch.unhealthy", Label: fmt.Sprintf("Switch state: %s", switchState),
-				Value: switchState, Severity: "error",
-			})
-		}
+	switchState, hasSwitch := data["switchState"].(string)
+	if !hasSwitch || switchState == "" {
+		// switchState absent — the switch-info API didn't return switch-state field.
+		// Treat as unknown, not healthy, so signal rollup always has something.
+		sigs = append(sigs, SnapshotSignal{
+			Key: "switch.unknown", Label: "Switch state not reported",
+			Value: "unknown", Severity: "warning",
+		})
+	} else if !strings.EqualFold(switchState, "online") {
+		sigs = append(sigs, SnapshotSignal{
+			Key: "switch.unhealthy", Label: fmt.Sprintf("Switch state: %s", switchState),
+			Value: switchState, Severity: "error",
+		})
 	}
 
 	var ePortCount int

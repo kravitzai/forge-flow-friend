@@ -354,10 +354,8 @@ func (d *LocalDB) GetSnapshotSummary(
 		return nil, fmt.Errorf("local_db: unmarshal summary: %w", err)
 	}
 
-	if summary.SignalCount == 0 {
-		return nil, nil
-	}
-
+	// Always return the summary — even with 0 signals — so the cloud
+	// receives a verdict (healthy) and the target appears on Unified Ops.
 	return &summary, nil
 }
 
