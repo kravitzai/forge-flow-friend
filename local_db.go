@@ -297,6 +297,35 @@ func (d *LocalDB) MarkSynced(snapshotID string) error {
 	return err
 }
 
+// MarkLegacySynced marks all snapshots collected
+// before startTime as synced. Called once at startup
+// to clear legacy unsynced_count from before
+// MarkSynced was wired in upload_queue.go.
+func (d *LocalDB) MarkLegacySynced(
+	startTime time.Time,
+) (int64, error) {
+	if d == nil || !d.enabled {
+		return 0, nil
+	}
+
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
+	res, err := d.db.Exec(`
+		UPDATE snapshots
+		SET    synced_at =
+		         strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE  synced_at IS NULL
+		AND    collected_at < ?
+	`, startTime.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
 // ── Retention ──
 
 // RunRetention deletes snapshots older than maxAgeDays.
