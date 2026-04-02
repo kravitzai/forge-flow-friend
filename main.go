@@ -159,6 +159,7 @@ func main() {
 	supervisor.RegisterAdapter("bluefield", NewBlueFieldAdapter)
 	supervisor.RegisterAdapter("dell-idrac", NewIdracAdapter)
 	supervisor.RegisterAdapter("mikrotik", NewMikroTikAdapter)
+	supervisor.RegisterAdapter("mikrotik-swos", NewMikroTikSwOSAdapter)
 
 	// ── Enrollment / State Loading ──
 	enrollmentToken := os.Getenv("FORGEAI_ENROLLMENT_TOKEN")

@@ -20,6 +20,7 @@ var SupportedTargetTypes = []string{
 	"kubernetes",
 	"linux",
 	"mikrotik",
+	"mikrotik-swos",
 	"ndfc",
 	"netapp-ontap",
 	"nexus",
