@@ -85,6 +85,14 @@ func (a *BrocadeAdapter) Collect() (map[string]interface{}, error) {
 	definedConfig, _ := a.brocadeGet("/rest/running/brocade-zone/defined-configuration")
 	fabricInfo, _ := a.brocadeGet("/rest/running/brocade-fabric/fabric-switch")
 	fru, _ := a.brocadeGet("/rest/running/brocade-fru/fru")
+	if fru == nil {
+		// FOS v8.x uses /blade endpoint
+		fru, _ = a.brocadeGet("/rest/running/brocade-fru/blade")
+	}
+	if fru == nil {
+		// Try power-supply directly
+		fru, _ = a.brocadeGet("/rest/running/brocade-fru/power-supply")
+	}
 
 	snapshotData := normalizeBrocadeSnapshot(chassis, switchInfo, ports, media, zoneConfig, definedConfig, fabricInfo, fru)
 
