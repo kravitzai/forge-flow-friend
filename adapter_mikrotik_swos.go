@@ -17,6 +17,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -114,12 +115,12 @@ func (a *MikroTikSwOSAdapter) swosLogin() error {
 		pathStyle string
 	}
 	candidates := []candidate{
-		// SwOS Lite (CSS326, CSS610 etc) — try first because these
-		// devices also respond to bang paths with HTML catch-all
-		// (false positive).
-		{"/link", "lite"},
-		{"/sys", "lite"},
-		{"/stat", "lite"},
+		// SwOS Lite / modern SwOS raw data pages (.b endpoints).
+		// Try these first for CSS-series devices because the HTML tab
+		// pages can return 200 with no machine-readable data.
+		{"/link.b", "lite"},
+		{"/sys.b", "lite"},
+		{"/fwd.b", "lite"},
 		// SwOS CRS/CloudRouter
 		{"/!link.b", "bang"},
 		{"/!dhost.b", "bang"},
@@ -150,18 +151,17 @@ func (a *MikroTikSwOSAdapter) swosLogin() error {
 // swosPageMap returns the correct URL path map based on the detected pathStyle.
 func (a *MikroTikSwOSAdapter) swosPageMap() map[string]string {
 	if a.pathStyle == "lite" {
-		// CSS series SwOS Lite paths
+		// CSS series / modern SwOS raw .b paths
 		return map[string]string{
-			"system": "/sys",
-			"link":   "/link",
-			"stats":  "/stat",
-			"sfp":    "/sfp",
-			"vlan":   "/vlan",
-			"fwd":    "/fwd",
-			"lag":    "/lag",
-			"rstp":   "/rstp",
-			"hosts":  "/host",
-			"snmp":   "/snmp",
+			"system": "/sys.b",
+			"link":   "/link.b",
+			"sfp":    "/sfp.b",
+			"poe":    "/poe.b",
+			"vlan":   "/vlan.b",
+			"fwd":    "/fwd.b",
+			"lag":    "/lacp.b",
+			"rstp":   "/rstp.b",
+			"snmp":   "/snmp.b",
 		}
 	}
 	// Default: CRS/CloudRouter bang paths
@@ -229,7 +229,7 @@ func (a *MikroTikSwOSAdapter) swosFormLogin() error {
 			pathStyle string
 		}
 		probes := []probeEntry{
-			{"/link", "lite"}, {"/sys", "lite"},
+			{"/link.b", "lite"}, {"/sys.b", "lite"},
 			{"/!link.b", "bang"}, {"/!dhost.b", "bang"},
 		}
 		for _, probe := range probes {
@@ -542,13 +542,15 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 
 	// Fallback: try legacy system page if /!dhost.b was unavailable
 	if _, hasSystem := rawPages["system"]; !hasSystem {
-		fallbacks := []string{"/sys.b", "/!link.b"}
+		fallbacks := []string{"/sys.b", "/link.b", "/!dhost.b", "/!link.b"}
 		for _, fb := range fallbacks {
 			if body, err := a.swosGet(fb); err == nil {
-				rawPages["system"] = string(body)
-				capabilities["hasSystem"] = true
-				log.Printf("[mikrotik-swos:%s] System page fallback succeeded via %s", a.profile.Name, fb)
-				break
+				if isSwOSDataPage(body) {
+					rawPages["system"] = string(body)
+					capabilities["hasSystem"] = true
+					log.Printf("[mikrotik-swos:%s] System page fallback succeeded via %s", a.profile.Name, fb)
+					break
+				}
 			}
 		}
 	}
@@ -691,6 +693,13 @@ var jsVarRe = regexp.MustCompile(`(?s)var\s+(\w+)\s*=\s*(\[.*?\]|\{.*?\}|\d+|'[^
 // e.g. nm=['ether1','ether2']; or lnk=[1,0,1,0]; or brd='CSS326-24G-2S+';
 var jsBareRe = regexp.MustCompile(`(?s)(?:^|[;\n])\s*(\w+)\s*=\s*(\[.*?\]|\{.*?\}|\d+|'[^']*'|"[^"]*");`)
 
+// Raw SwOS .b pages often return a JS object literal rather than assignments,
+// e.g. {i01:0x03ff,i0a:['506f727431','506f727432']}.
+var swosObjectPageRe = regexp.MustCompile(`(?s)^\s*\{.*:[^}]+\}\s*$`)
+var swosObjectKeyRe = regexp.MustCompile(`([{,]\s*)([A-Za-z][A-Za-z0-9_]*)\s*:`)
+var swosHexTokenRe = regexp.MustCompile(`\b0x[0-9A-Fa-f]+\b`)
+var swosHexStringRe = regexp.MustCompile(`^[0-9A-Fa-f]+$`)
+
 func (a *MikroTikSwOSAdapter) parseSystemPage(page string) map[string]interface{} {
 	result := map[string]interface{}{}
 	if page == "" {
@@ -711,24 +720,25 @@ func (a *MikroTikSwOSAdapter) parseSystemPage(page string) map[string]interface{
 		return ""
 	}
 
-	if v := strOr("nm", "id", "name"); v != "" {
-		result["deviceName"] = v
+	if v := strOr("nm", "id", "name", "i05"); v != "" {
+		result["deviceName"] = decodeSwOSHexASCII(v)
 	}
-	if v := strOr("mac", "MAC"); v != "" {
-		result["macAddress"] = v
+	if v := strOr("mac", "MAC", "i03"); v != "" {
+		result["macAddress"] = formatSwOSMAC(v)
 	}
-	if v := strOr("brd", "board", "type"); v != "" {
-		result["board"] = v
-		result["model"] = v
+	if v := strOr("brd", "board", "type", "i07"); v != "" {
+		decoded := decodeSwOSHexASCII(v)
+		result["board"] = decoded
+		result["model"] = decoded
 	}
-	if v := strOr("ver", "version"); v != "" {
-		result["version"] = v
+	if v := strOr("ver", "version", "i06"); v != "" {
+		result["version"] = decodeSwOSHexASCII(v)
 	}
-	if v := strOr("bld", "build"); v != "" {
-		result["build"] = v
+	if v := strOr("bld", "build", "i0b"); v != "" {
+		result["build"] = decodeSwOSHexASCII(v)
 	}
-	if v := strOr("upn", "uptime"); v != "" {
-		result["uptime"] = v
+	if v := strOr("upn", "uptime", "upt", "i01"); v != "" {
+		result["uptime"] = decodeSwOSHexASCII(v)
 	}
 
 	return result
@@ -737,6 +747,106 @@ func (a *MikroTikSwOSAdapter) parseSystemPage(page string) map[string]interface{
 func (a *MikroTikSwOSAdapter) parseLinkPage(page string) []map[string]interface{} {
 	if page == "" {
 		return nil
+	}
+
+	kvPairs := extractJSVars(page)
+	if len(kvPairs) > 0 {
+		// SwOS Lite / CSS series: raw .b object pages with hex-coded field names.
+		if kvPairs["i0a"] != "" || kvPairs["i01"] != "" || kvPairs["i06"] != "" {
+			names := decodeSwOSHexArray(parseJSArray(kvPairs["i0a"]))
+			speeds := parseJSArray(kvPairs["i05"])
+			duplex := parseJSArray(kvPairs["i07"])
+			status := parseJSArray(kvPairs["i08"])
+			count := firstNonZero(
+				len(names),
+				len(speeds),
+				len(duplex),
+				len(status),
+				bitmaskWidth(kvPairs["i01"]),
+				bitmaskWidth(kvPairs["i06"]),
+			)
+			if count > 0 {
+				enabled := parseSwOSBitmask(kvPairs["i01"], count)
+				linked := parseSwOSBitmask(kvPairs["i06"], count)
+				ports := make([]map[string]interface{}, 0, count)
+				for i := 0; i < count; i++ {
+					port := map[string]interface{}{"index": i}
+					if i < len(names) && names[i] != "" {
+						port["nm"] = names[i]
+					}
+					if i < len(speeds) && speeds[i] != "" {
+						port["spd"] = speeds[i]
+					}
+					if i < len(duplex) && duplex[i] != "" {
+						port["dpx"] = duplex[i]
+					}
+					if i < len(enabled) && enabled[i] {
+						port["en"] = "1"
+						port["adminState"] = "enabled"
+					} else {
+						port["en"] = "0"
+						port["adminState"] = "disabled"
+					}
+					if i < len(linked) && linked[i] {
+						port["lnk"] = "1"
+						port["linkState"] = "up"
+					} else {
+						port["lnk"] = "0"
+						port["linkState"] = "down"
+					}
+					ports = append(ports, port)
+				}
+				return ports
+			}
+		}
+
+		// Standard SwOS raw .b object pages with named bitmasks/arrays.
+		if kvPairs["nm"] != "" || kvPairs["en"] != "" || kvPairs["lnk"] != "" || kvPairs["prt"] != "" {
+			names := decodeSwOSHexArray(parseJSArray(kvPairs["nm"]))
+			speeds := parseJSArray(kvPairs["spd"])
+			duplex := parseJSArray(kvPairs["dpx"])
+			count := firstNonZero(
+				len(names),
+				parseSwOSInt(kvPairs["prt"]),
+				len(speeds),
+				len(duplex),
+				bitmaskWidth(kvPairs["en"]),
+				bitmaskWidth(kvPairs["lnk"]),
+			)
+			if count > 0 {
+				enabled := parseSwOSBitmask(kvPairs["en"], count)
+				linked := parseSwOSBitmask(kvPairs["lnk"], count)
+				ports := make([]map[string]interface{}, 0, count)
+				for i := 0; i < count; i++ {
+					port := map[string]interface{}{"index": i}
+					if i < len(names) && names[i] != "" {
+						port["nm"] = names[i]
+					}
+					if i < len(speeds) && speeds[i] != "" {
+						port["spd"] = speeds[i]
+					}
+					if i < len(duplex) && duplex[i] != "" {
+						port["dpx"] = duplex[i]
+					}
+					if i < len(enabled) && enabled[i] {
+						port["en"] = "1"
+						port["adminState"] = "enabled"
+					} else {
+						port["en"] = "0"
+						port["adminState"] = "disabled"
+					}
+					if i < len(linked) && linked[i] {
+						port["lnk"] = "1"
+						port["linkState"] = "up"
+					} else {
+						port["lnk"] = "0"
+						port["linkState"] = "down"
+					}
+					ports = append(ports, port)
+				}
+				return ports
+			}
+		}
 	}
 
 	// SwOS link page exports arrays for port properties
@@ -991,6 +1101,14 @@ func extractJSVars(page string) map[string]string {
 			}
 		}
 	}
+	// Third pass: raw .b object-literal pages ({key:value,...})
+	if len(result) == 0 {
+		if obj := parseSwOSObjectPage(page); len(obj) > 0 {
+			for key, value := range obj {
+				result[key] = stringifySwOSValue(value)
+			}
+		}
+	}
 	return result
 }
 
@@ -1039,6 +1157,173 @@ func parseJSArray(raw string) []string {
 	return result
 }
 
+func parseSwOSObjectPage(page string) map[string]interface{} {
+	s := strings.TrimSpace(page)
+	if !swosObjectPageRe.MatchString(s) {
+		return nil
+	}
+	jsonish := swosObjectKeyRe.ReplaceAllString(s, `$1"$2":`)
+	jsonish = strings.ReplaceAll(jsonish, "'", `"`)
+	jsonish = swosHexTokenRe.ReplaceAllStringFunc(jsonish, func(token string) string {
+		return `"` + token + `"`
+	})
+
+	var obj map[string]interface{}
+	if err := json.Unmarshal([]byte(jsonish), &obj); err != nil {
+		return nil
+	}
+	return obj
+}
+
+func stringifySwOSValue(value interface{}) string {
+	switch v := value.(type) {
+	case string:
+		return v
+	case float64:
+		if v == float64(int64(v)) {
+			return strconv.FormatInt(int64(v), 10)
+		}
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case bool:
+		if v {
+			return "true"
+		}
+		return "false"
+	case []interface{}:
+		parts := make([]string, 0, len(v))
+		for _, item := range v {
+			switch iv := item.(type) {
+			case string:
+				parts = append(parts, strconv.Quote(iv))
+			default:
+				parts = append(parts, stringifySwOSValue(iv))
+			}
+		}
+		return "[" + strings.Join(parts, ",") + "]"
+	default:
+		b, err := json.Marshal(v)
+		if err != nil {
+			return fmt.Sprint(v)
+		}
+		return string(b)
+	}
+}
+
+func firstNonZero(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func parseSwOSUint(raw string) (uint64, error) {
+	s := strings.TrimSpace(strings.Trim(raw, `"'`))
+	if s == "" {
+		return 0, fmt.Errorf("empty value")
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "0x") {
+		return strconv.ParseUint(lower[2:], 16, 64)
+	}
+	if swosHexStringRe.MatchString(s) && strings.IndexFunc(s, func(r rune) bool {
+		return r < '0' || (r > '9' && r < 'A') || (r > 'F' && r < 'a') || r > 'f'
+	}) == -1 {
+		if strings.IndexAny(s, "abcdefABCDEF") >= 0 {
+			return strconv.ParseUint(s, 16, 64)
+		}
+		return strconv.ParseUint(s, 10, 64)
+	}
+	return strconv.ParseUint(s, 10, 64)
+}
+
+func parseSwOSInt(raw string) int {
+	v, err := parseSwOSUint(raw)
+	if err != nil {
+		return 0
+	}
+	return int(v)
+}
+
+func bitmaskWidth(raw string) int {
+	v, err := parseSwOSUint(raw)
+	if err != nil {
+		return 0
+	}
+	width := 0
+	for v > 0 {
+		width++
+		v >>= 1
+	}
+	return width
+}
+
+func parseSwOSBitmask(raw string, count int) []bool {
+	if count <= 0 {
+		count = bitmaskWidth(raw)
+	}
+	if count <= 0 {
+		return nil
+	}
+	v, err := parseSwOSUint(raw)
+	if err != nil {
+		return nil
+	}
+	flags := make([]bool, count)
+	for i := 0; i < count; i++ {
+		flags[i] = (v & (1 << i)) != 0
+	}
+	return flags
+}
+
+func decodeSwOSHexASCII(raw string) string {
+	s := strings.TrimSpace(strings.Trim(raw, `"'`))
+	if s == "" || strings.HasPrefix(strings.ToLower(s), "0x") || len(s)%2 != 0 || !swosHexStringRe.MatchString(s) {
+		return s
+	}
+	decoded, err := hex.DecodeString(s)
+	if err != nil {
+		return s
+	}
+	for _, b := range decoded {
+		if b < 32 || b > 126 {
+			return s
+		}
+	}
+	return string(decoded)
+}
+
+func decodeSwOSHexArray(values []string) []string {
+	decoded := make([]string, 0, len(values))
+	for _, value := range values {
+		decoded = append(decoded, decodeSwOSHexASCII(value))
+	}
+	return decoded
+}
+
+func formatSwOSMAC(raw string) string {
+	s := strings.TrimSpace(strings.Trim(raw, `"'`))
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, ":") || strings.Contains(s, "-") {
+		return strings.ToUpper(strings.ReplaceAll(s, "-", ":"))
+	}
+	lower := strings.ToLower(s)
+	if strings.HasPrefix(lower, "0x") {
+		s = s[2:]
+	}
+	if len(s) == 12 && swosHexStringRe.MatchString(s) {
+		parts := make([]string, 0, 6)
+		for i := 0; i < len(s); i += 2 {
+			parts = append(parts, strings.ToUpper(s[i:i+2]))
+		}
+		return strings.Join(parts, ":")
+	}
+	return s
+}
+
 func ucFirst(s string) string {
 	if s == "" {
 		return s
@@ -1068,11 +1353,12 @@ func isSwOSDataPage(body []byte) bool {
 	if jsBareRe.MatchString(s) {
 		return true
 	}
+	// Check for raw .b object-literal pages ({i01:0x03ff,...})
+	if parseSwOSObjectPage(s) != nil {
+		return true
+	}
 	return false
 }
-
-
-
 
 func (a *MikroTikSwOSAdapter) HealthCheck() error {
 	if !a.sessionOK {
