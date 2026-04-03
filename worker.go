@@ -381,25 +381,13 @@ func (w *Worker) collect() {
 			// so the cloud summary can reference it
 			payload["_localSnapshotId"] = snapshotID
 
-			// Attach signal summary so buildCloudSummaryPayload
-			// can include it in the cloud envelope.
-			// This avoids duplicating adapter signal logic in Go —
-			// signals are written to the local DB by WriteSnapshot
-			// and read back here as a summary.
-			if summary, err := w.localDB.GetSnapshotSummary(
-				snapshotID); err == nil && summary != nil {
-				payload["_signalSummary"] = summary
-			}
 		}
 	}
 
 	// ── Cloud upload ──
-	// In Hybrid Mode, strip raw snapshot_data before
-	// sending to cloud — only send summary.
+	// Full payload is sent to cloud for all platforms.
+	// Local DB still serves as the primary fast-access store.
 	uploadPayload := payload
-	if w.localDB != nil {
-		uploadPayload = buildCloudSummaryPayload(payload)
-	}
 
 	if w.uploadQueue != nil {
 		priority := ClassifySnapshotPriority(uploadPayload)
@@ -537,48 +525,3 @@ func (w *Worker) notifyStateChange(status WorkerStatus) {
 	}
 }
 
-// buildCloudSummaryPayload strips the raw snapshotData
-// from a payload, replacing it with a summary envelope.
-// All other fields (targetId, targetType, collectedAt,
-// alerts, type) are preserved.
-//
-// This is the Hybrid Mode cloud-sync path — raw data
-// stays on-prem, only the summary reaches the cloud.
-func buildCloudSummaryPayload(
-	payload map[string]interface{},
-) map[string]interface{} {
-	summary := make(map[string]interface{})
-
-	// Preserve envelope fields
-	for _, k := range []string{
-		"targetId", "targetType", "collectedAt",
-		"type", "agentVersion", "_localSnapshotId",
-	} {
-		if v, ok := payload[k]; ok {
-			summary[k] = v
-		}
-	}
-
-	// Mark as summary so the edge function knows
-	// not to expect snapshotData
-	summary["_hybridSummary"] = true
-
-	// Include alert count and top alerts for
-	// Unified Ops attention feed
-	if alerts, ok := payload["alerts"]; ok {
-		summary["alerts"] = alerts
-	}
-
-	// Include signal summary — prefer pre-computed summary
-	// from local DB, fall back to building from raw _signals.
-	if ss, ok := payload["_signalSummary"]; ok {
-		summary["_signalSummary"] = ss
-	} else if signals, ok := payload["_signals"]; ok {
-		if sl, ok := signals.([]SnapshotSignal); ok {
-			s := buildSummary(sl)
-			summary["_signalSummary"] = s
-		}
-	}
-
-	return summary
-}
