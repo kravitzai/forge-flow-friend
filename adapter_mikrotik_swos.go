@@ -94,17 +94,26 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 	return nil
 }
 
-// swosLogin authenticates to the SwOS web UI by probing a real data page.
+// swosLogin authenticates by probing a ranked list of SwOS data pages.
+// Returns nil as soon as any page responds successfully.
+// Different SwOS versions expose different pages.
 func (a *MikroTikSwOSAdapter) swosLogin() error {
-	if _, err := a.swosGet("/!dhost.b"); err == nil {
-		return nil
-	} else {
-		if _, legacyErr := a.swosGet("/sys.b"); legacyErr == nil {
+	candidates := []string{
+		"/!link.b",  // present on all SwOS
+		"/!dhost.b", // most CRS/CSS models
+		"/sys.b",    // legacy SwOS
+		"/!stats.b", // fallback
+	}
+	var lastErr error
+	for _, path := range candidates {
+		if _, err := a.swosGet(path); err == nil {
+			log.Printf("[mikrotik-swos:%s] Auth probe succeeded via %s", a.profile.Name, path)
 			return nil
 		} else {
-			return fmt.Errorf("system page auth probe failed: primary=%v; legacy=%v", err, legacyErr)
+			lastErr = err
 		}
 	}
+	return fmt.Errorf("SwOS auth probe failed on all candidates: %w", lastErr)
 }
 
 // swosGet fetches a SwOS internal page using the device's native HTTP auth.
@@ -328,6 +337,19 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 		capabilities["has"+ucFirst(section)] = true
 	}
 
+	// Fallback: try legacy system page if /!dhost.b was unavailable
+	if _, hasSystem := rawPages["system"]; !hasSystem {
+		fallbacks := []string{"/sys.b", "/!link.b"}
+		for _, fb := range fallbacks {
+			if body, err := a.swosGet(fb); err == nil {
+				rawPages["system"] = string(body)
+				capabilities["hasSystem"] = true
+				log.Printf("[mikrotik-swos:%s] System page fallback succeeded via %s", a.profile.Name, fb)
+				break
+			}
+		}
+	}
+
 	// ── Parse each available page ──
 	identity := a.parseSystemPage(rawPages["system"])
 	ports := a.parseLinkPage(rawPages["link"])
@@ -388,8 +410,9 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 		"_signals":     signals,
 	}
 
-	if len(signals) > 0 {
-		log.Printf("[mikrotik-swos:%s] Emitting %d signals", a.profile.Name, len(signals))
+	log.Printf("[mikrotik-swos:%s] Emitting %d signals for cloud rollup", a.profile.Name, len(signals))
+	for i, s := range signals {
+		log.Printf("[mikrotik-swos:%s]   signal[%d] key=%s sev=%s label=%s", a.profile.Name, i, s.Key, s.Severity, s.Label)
 	}
 
 	return result, nil
