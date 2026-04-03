@@ -36,6 +36,13 @@ type MikroTikSwOSAdapter struct {
 	pass       string
 	sessionOK  bool
 	snmpTarget string // optional SNMP augmentation target
+	// Preemptive auth — populated after first successful digest/basic
+	// handshake so all subsequent requests skip the 401 round-trip.
+	authScheme string // "digest", "basic", ""
+	authRealm  string // digest realm
+	authNonce  string // last good nonce
+	authOpaque string // digest opaque
+	authQop    string // digest qop
 }
 
 var digestAuthParamRe = regexp.MustCompile(`(\w+)=("([^"]*)"|[^,]+)`)
@@ -123,12 +130,63 @@ func (a *MikroTikSwOSAdapter) swosGet(path string) ([]byte, error) {
 	return a.swosRequest(http.MethodGet, path, nil, "")
 }
 
+// buildPreemptiveAuth constructs an Authorization header using stored auth
+// parameters so the adapter can authenticate without a 401 round-trip.
+// Returns "" if no auth has been established yet.
+func (a *MikroTikSwOSAdapter) buildPreemptiveAuth(method, path string) string {
+	switch a.authScheme {
+	case "basic":
+		token := base64.StdEncoding.EncodeToString([]byte(a.user + ":" + a.pass))
+		return "Basic " + token
+	case "digest":
+		if a.authRealm == "" || a.authNonce == "" {
+			return ""
+		}
+		cnonce, err := randomHex(8)
+		if err != nil {
+			return ""
+		}
+		ha1 := md5Hex(fmt.Sprintf("%s:%s:%s", a.user, a.authRealm, a.pass))
+		ha2 := md5Hex(fmt.Sprintf("%s:%s", method, path))
+		nc := "00000001"
+		var response string
+		if a.authQop != "" {
+			response = md5Hex(fmt.Sprintf("%s:%s:%s:%s:%s:%s", ha1, a.authNonce, nc, cnonce, a.authQop, ha2))
+		} else {
+			response = md5Hex(fmt.Sprintf("%s:%s:%s", ha1, a.authNonce, ha2))
+		}
+		parts := []string{
+			fmt.Sprintf(`Digest username="%s"`, a.user),
+			fmt.Sprintf(`realm="%s"`, a.authRealm),
+			fmt.Sprintf(`nonce="%s"`, a.authNonce),
+			fmt.Sprintf(`uri="%s"`, path),
+			fmt.Sprintf(`response="%s"`, response),
+		}
+		if a.authOpaque != "" {
+			parts = append(parts, fmt.Sprintf(`opaque="%s"`, a.authOpaque))
+		}
+		if a.authQop != "" {
+			parts = append(parts,
+				fmt.Sprintf("qop=%s", a.authQop),
+				fmt.Sprintf("nc=%s", nc),
+				fmt.Sprintf(`cnonce="%s"`, cnonce),
+			)
+		}
+		return strings.Join(parts, ", ")
+	}
+	return ""
+}
+
 func (a *MikroTikSwOSAdapter) swosRequest(method, path string, body []byte, contentType string) ([]byte, error) {
-	resp, err := a.doSwOSRequest(method, path, body, contentType, "")
+	// ── Attempt 1: preemptive auth ──
+	// If we have stored credentials, send them immediately to skip the 401 round-trip.
+	preemptive := a.buildPreemptiveAuth(method, path)
+	resp, err := a.doSwOSRequest(method, path, body, contentType, preemptive)
 	if err != nil {
 		return nil, fmt.Errorf("%s %s: %w", method, path, err)
 	}
 
+	// ── Handle 401: learn auth scheme ──
 	if resp.StatusCode == http.StatusUnauthorized {
 		challenge := resp.Header.Get("Www-Authenticate")
 		_, _ = io.Copy(io.Discard, resp.Body)
@@ -136,30 +194,36 @@ func (a *MikroTikSwOSAdapter) swosRequest(method, path string, body []byte, cont
 
 		authHeader, scheme, authErr := buildSwOSAuthHeader(challenge, method, path, a.user, a.pass)
 		if authErr != nil {
-			return nil, fmt.Errorf("%s %s: auth challenge unsupported: %w", method, path, authErr)
+			return nil, fmt.Errorf("%s %s: auth unsupported: %w", method, path, authErr)
 		}
 		log.Printf("[mikrotik-swos:%s] Retrying %s with %s auth", a.profile.Name, path, scheme)
 
-		// First retry: establishes session cookie on newer SwOS firmware.
-		// The response may be a landing page, not data.
-		authResp, authRetryErr := a.doSwOSRequest(method, path, body, contentType, authHeader)
-		if authRetryErr != nil {
-			return nil, fmt.Errorf("%s %s auth: %w", method, path, authRetryErr)
-		}
-		// Drain and close — session cookie is now stored in the jar regardless of content.
-		_, _ = io.Copy(io.Discard, authResp.Body)
-		authResp.Body.Close()
-
-		if authResp.StatusCode == http.StatusUnauthorized || authResp.StatusCode == http.StatusForbidden {
-			return nil, fmt.Errorf("HTTP %d after %s auth", authResp.StatusCode, scheme)
-		}
-
-		// Second request: session cookie is sent automatically by the jar.
-		// This is the actual data response.
-		log.Printf("[mikrotik-swos:%s] Session established via %s, fetching %s", a.profile.Name, scheme, path)
-		resp, err = a.doSwOSRequest(method, path, body, contentType, "")
+		resp, err = a.doSwOSRequest(method, path, body, contentType, authHeader)
 		if err != nil {
-			return nil, fmt.Errorf("%s %s session fetch: %w", method, path, err)
+			return nil, fmt.Errorf("%s %s retry: %w", method, path, err)
+		}
+
+		// Store auth params for future preemptive use
+		if resp.StatusCode == http.StatusOK {
+			params := parseDigestAuthParams(challenge)
+			a.authScheme = scheme
+			if scheme == "digest" {
+				a.authRealm = params["realm"]
+				a.authNonce = params["nonce"]
+				a.authOpaque = params["opaque"]
+				a.authQop = func() string {
+					for _, opt := range strings.Split(params["qop"], ",") {
+						if strings.TrimSpace(opt) == "auth" {
+							return "auth"
+						}
+					}
+					if params["qop"] != "" {
+						return strings.TrimSpace(params["qop"])
+					}
+					return ""
+				}()
+				log.Printf("[mikrotik-swos:%s] Stored digest auth params (realm=%s)", a.profile.Name, a.authRealm)
+			}
 		}
 	}
 	defer resp.Body.Close()
