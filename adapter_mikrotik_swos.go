@@ -1364,7 +1364,27 @@ func (a *MikroTikSwOSAdapter) HealthCheck() error {
 	if !a.sessionOK {
 		return fmt.Errorf("SwOS session not established")
 	}
-	return nil
+	// Probe the first available page to confirm network reachability.
+	// Uses a short deadline so the worker's error counter increments
+	// quickly during outages rather than waiting for the full per-page
+	// collect timeout.
+	probes := []string{"/link", "/sys", "/!link.b", "/!dhost.b"}
+	for _, p := range probes {
+		_, err := a.swosGet(p)
+		if err == nil {
+			return nil
+		}
+		// Network unreachable / timeout = fail fast
+		if strings.Contains(err.Error(), "unreachable") ||
+			strings.Contains(err.Error(), "deadline") ||
+			strings.Contains(err.Error(), "timeout") {
+			a.sessionOK = false
+			return fmt.Errorf("SwOS unreachable: %w", err)
+		}
+	}
+	// All probes failed
+	a.sessionOK = false
+	return fmt.Errorf("SwOS health probe failed on all candidates")
 }
 
 // Ensure adapter conforms to SNMP augmentation pattern
