@@ -337,6 +337,11 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 		capabilities["has"+ucFirst(section)] = true
 	}
 
+	log.Printf("[mikrotik-swos:%s] Pages fetched: %d of %d attempted", a.profile.Name, len(rawPages), len(pageMap))
+	for section := range rawPages {
+		log.Printf("[mikrotik-swos:%s]   page[%s] = %d bytes", a.profile.Name, section, len(rawPages[section]))
+	}
+
 	// Fallback: try legacy system page if /!dhost.b was unavailable
 	if _, hasSystem := rawPages["system"]; !hasSystem {
 		fallbacks := []string{"/sys.b", "/!link.b"}
@@ -352,6 +357,51 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 
 	// ── Parse each available page ──
 	identity := a.parseSystemPage(rawPages["system"])
+
+	// If identity is sparse (common when /!dhost.b is unavailable),
+	// scan ALL fetched pages for scalar identity vars (brd, ver, mac)
+	// that many SwOS pages include as header variables.
+	if identity["model"] == nil || identity["version"] == nil {
+		identityVars := []string{"brd", "ver", "mac", "bld"}
+		for section, pageContent := range rawPages {
+			if section == "system" {
+				continue // already parsed
+			}
+			kvPairs := extractJSVars(pageContent)
+			for _, varName := range identityVars {
+				v, ok := kvPairs[varName]
+				if !ok || strings.HasPrefix(v, "[") {
+					continue // skip arrays
+				}
+				switch varName {
+				case "brd":
+					if identity["model"] == nil {
+						identity["board"] = v
+						identity["model"] = v
+					}
+				case "ver":
+					if identity["version"] == nil {
+						identity["version"] = v
+					}
+				case "mac":
+					if identity["macAddress"] == nil {
+						identity["macAddress"] = v
+					}
+				case "bld":
+					if identity["build"] == nil {
+						identity["build"] = v
+					}
+				}
+			}
+		}
+		log.Printf("[mikrotik-swos:%s] Identity after cross-page scan: model=%v version=%v mac=%v",
+			a.profile.Name, identity["model"], identity["version"], identity["macAddress"])
+	}
+
+	// Sanitize: if deviceName looks like a JS array, clear it
+	if dn, ok := identity["deviceName"].(string); ok && strings.HasPrefix(dn, "[") {
+		delete(identity, "deviceName")
+	}
 	ports := a.parseLinkPage(rawPages["link"])
 	stats := a.parseStatsPage(rawPages["stats"])
 	sfp := a.parseSfpPage(rawPages["sfp"])
