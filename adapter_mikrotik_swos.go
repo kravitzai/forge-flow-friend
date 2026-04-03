@@ -60,7 +60,10 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 	}
 
 	jar, _ := cookiejar.New(nil)
-	a.client = NewHTTPClientFromProfile(profile, timeout)
+	tlsCfg := &TLSConfig{
+		InsecureSkipVerify: profile.TLS.InsecureSkipVerify,
+	}
+	a.client = NewHTTPClient(tlsCfg, nil, timeout)
 	a.client.Jar = jar
 
 	// Authenticate by probing a real SwOS data page.
@@ -75,7 +78,7 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 			log.Printf("[mikrotik-swos:%s] HTTPS failed, trying HTTP at %s...", profile.Name, httpURL)
 			a.baseURL = httpURL
 			jar2, _ := cookiejar.New(nil)
-			a.client = NewHTTPClientFromProfile(profile, timeout)
+			a.client = NewHTTPClient(tlsCfg, nil, timeout)
 			a.client.Jar = jar2
 			err2 := a.swosLogin()
 			if err2 != nil {
