@@ -122,7 +122,67 @@ func (a *MikroTikSwOSAdapter) swosLogin() error {
 		}
 		log.Printf("[mikrotik-swos:%s] %s returned 200 but no JS data — likely auth redirect, continuing probe", a.profile.Name, path)
 	}
+	// ── Fallback: form-based POST login ──
+	// Used by SwOS 2.x on CRS series devices that do not use HTTP digest/basic auth.
+	log.Printf("[mikrotik-swos:%s] HTTP auth failed, trying form-based login", a.profile.Name)
+	if err := a.swosFormLogin(); err == nil {
+		return nil
+	}
 	return fmt.Errorf("SwOS auth probe: no candidate page returned valid JS data — check credentials and device reachability")
+}
+
+// swosFormLogin attempts web-form-based login used by SwOS 2.x on CRS series
+// devices. POSTs credentials to "/" with URL-encoded form body. On success the
+// cookie jar stores the session cookie and subsequent data page GETs work
+// without any Authorization header.
+func (a *MikroTikSwOSAdapter) swosFormLogin() error {
+	endpoints := []struct {
+		path        string
+		bodyFmt     string
+		contentType string
+	}{
+		{"/", "username=%s&password=%s", "application/x-www-form-urlencoded"},
+		{"/login", "username=%s&password=%s", "application/x-www-form-urlencoded"},
+		{"/!auth.b", "username=%s&password=%s", "application/x-www-form-urlencoded"},
+	}
+	for _, ep := range endpoints {
+		formBody := fmt.Sprintf(ep.bodyFmt, a.user, a.pass)
+		body := []byte(formBody)
+
+		// Disable redirect following so we can inspect the Set-Cookie on the 302
+		prevRedirect := a.client.CheckRedirect
+		a.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		resp, err := a.doSwOSRequest(http.MethodPost, ep.path, body, ep.contentType, "")
+		a.client.CheckRedirect = prevRedirect
+
+		if err != nil {
+			log.Printf("[mikrotik-swos:%s] Form POST %s failed: %v", a.profile.Name, ep.path, err)
+			continue
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+
+		// Accept 200 or 302 — both can indicate successful form login on SwOS
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
+			log.Printf("[mikrotik-swos:%s] Form POST %s returned %d, skipping", a.profile.Name, ep.path, resp.StatusCode)
+			continue
+		}
+
+		// Verify the login worked by fetching a data page and checking for JS content
+		probes := []string{"/!link.b", "/!dhost.b", "/!stats.b"}
+		for _, probe := range probes {
+			pbody, perr := a.swosGet(probe)
+			if perr == nil && isSwOSDataPage(pbody) {
+				log.Printf("[mikrotik-swos:%s] Form login via %s confirmed by %s (%d bytes)", a.profile.Name, ep.path, probe, len(pbody))
+				a.authScheme = "form"
+				return nil
+			}
+		}
+		log.Printf("[mikrotik-swos:%s] Form POST %s accepted but data pages still return no JS content", a.profile.Name, ep.path)
+	}
+	return fmt.Errorf("form login failed on all endpoints")
 }
 
 // swosGet fetches a SwOS internal page using the device's native HTTP auth.
@@ -248,6 +308,9 @@ func (a *MikroTikSwOSAdapter) doSwOSRequest(method, path string, body []byte, co
 	if err != nil {
 		return nil, err
 	}
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Referer", a.baseURL+"/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ForgeAI/1.0)")
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
 	}
