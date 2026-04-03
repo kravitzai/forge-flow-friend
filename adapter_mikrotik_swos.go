@@ -1361,29 +1361,30 @@ func isSwOSDataPage(body []byte) bool {
 }
 
 func (a *MikroTikSwOSAdapter) HealthCheck() error {
+	// If session was previously invalidated, attempt re-auth
+	// so the worker can self-heal without a full restart.
 	if !a.sessionOK {
-		return fmt.Errorf("SwOS session not established")
+		if err := a.swosLogin(); err != nil {
+			return fmt.Errorf("SwOS session recovery failed: %w", err)
+		}
+		a.sessionOK = true
 	}
-	// Probe the first available page to confirm network reachability.
-	// Uses a short deadline so the worker's error counter increments
-	// quickly during outages rather than waiting for the full per-page
-	// collect timeout.
+
 	probes := []string{"/link", "/sys", "/!link.b", "/!dhost.b"}
 	for _, p := range probes {
 		_, err := a.swosGet(p)
 		if err == nil {
 			return nil
 		}
-		// Network unreachable / timeout = fail fast
 		if strings.Contains(err.Error(), "unreachable") ||
 			strings.Contains(err.Error(), "deadline") ||
 			strings.Contains(err.Error(), "timeout") {
-			a.sessionOK = false
+			// Don't poison sessionOK — next cycle will try re-auth
 			return fmt.Errorf("SwOS unreachable: %w", err)
 		}
 	}
-	// All probes failed
-	a.sessionOK = false
+	// All probes failed — return error for worker counter
+	// but don't poison sessionOK so next cycle can retry
 	return fmt.Errorf("SwOS health probe failed on all candidates")
 }
 
