@@ -1378,9 +1378,13 @@ func (a *MikroTikSwOSAdapter) HealthCheck() error {
 		}
 		if strings.Contains(err.Error(), "unreachable") ||
 			strings.Contains(err.Error(), "deadline") ||
-			strings.Contains(err.Error(), "timeout") {
-			// Don't poison sessionOK — next cycle will try re-auth
-			return fmt.Errorf("SwOS unreachable: %w", err)
+			strings.Contains(err.Error(), "timeout") ||
+			strings.Contains(err.Error(), "connection reset") {
+			// Do NOT set sessionOK = false here.
+			// The session credentials are still valid — this is
+			// a network failure. The worker's error counter
+			// handles escalation to degraded/failed.
+			return fmt.Errorf("SwOS unreachable (%s): %w", p, err)
 		}
 	}
 	// All probes failed — return error for worker counter
