@@ -94,26 +94,28 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 	return nil
 }
 
-// swosLogin authenticates by probing a ranked list of SwOS data pages.
-// Returns nil as soon as any page responds successfully.
-// Different SwOS versions expose different pages.
+// swosLogin probes a ranked list of SwOS data pages and validates that
+// the response body actually contains JS variable data, not an auth
+// redirect (which also returns HTTP 200 on some firmware versions).
 func (a *MikroTikSwOSAdapter) swosLogin() error {
 	candidates := []string{
-		"/!link.b",  // present on all SwOS
-		"/!dhost.b", // most CRS/CSS models
+		"/!link.b",  // port link state — present on all SwOS, small payload
+		"/!dhost.b", // system identity — most CRS/CSS models
+		"/!stats.b", // port stats — fallback
 		"/sys.b",    // legacy SwOS
-		"/!stats.b", // fallback
 	}
-	var lastErr error
 	for _, path := range candidates {
-		if _, err := a.swosGet(path); err == nil {
-			log.Printf("[mikrotik-swos:%s] Auth probe succeeded via %s", a.profile.Name, path)
-			return nil
-		} else {
-			lastErr = err
+		body, err := a.swosGet(path)
+		if err != nil {
+			continue
 		}
+		if isSwOSDataPage(body) {
+			log.Printf("[mikrotik-swos:%s] Auth confirmed via %s (%d bytes)", a.profile.Name, path, len(body))
+			return nil
+		}
+		log.Printf("[mikrotik-swos:%s] %s returned 200 but no JS data — likely auth redirect, continuing probe", a.profile.Name, path)
 	}
-	return fmt.Errorf("SwOS auth probe failed on all candidates: %w", lastErr)
+	return fmt.Errorf("SwOS auth probe: no candidate page returned valid JS data — check credentials and device reachability")
 }
 
 // swosGet fetches a SwOS internal page using the device's native HTTP auth.
@@ -328,19 +330,23 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 			capabilities["has"+ucFirst(section)] = false
 			continue
 		}
-		pageStr := string(body)
-		if len(pageStr) < 10 || strings.Contains(pageStr, "\"error\"") {
+		if !isSwOSDataPage(body) {
+			log.Printf("[mikrotik-swos:%s] Page %s returned non-data content (%d bytes), skipping", a.profile.Name, section, len(body))
 			capabilities["has"+ucFirst(section)] = false
 			continue
 		}
+		pageStr := string(body)
 		rawPages[section] = pageStr
 		capabilities["has"+ucFirst(section)] = true
 	}
 
-	log.Printf("[mikrotik-swos:%s] Pages fetched: %d of %d attempted", a.profile.Name, len(rawPages), len(pageMap))
-	for section := range rawPages {
-		log.Printf("[mikrotik-swos:%s]   page[%s] = %d bytes", a.profile.Name, section, len(rawPages[section]))
-	}
+	log.Printf("[mikrotik-swos:%s] Fetched %d/%d pages: %v", a.profile.Name, len(rawPages), len(pageMap), func() []string {
+		keys := make([]string, 0, len(rawPages))
+		for k := range rawPages {
+			keys = append(keys, k)
+		}
+		return keys
+	}())
 
 	// Fallback: try legacy system page if /!dhost.b was unavailable
 	if _, hasSystem := rawPages["system"]; !hasSystem {
@@ -485,7 +491,9 @@ func (a *MikroTikSwOSAdapter) TargetType() string {
 
 // ── Page Parsers ──
 
-var jsVarRe = regexp.MustCompile(`var\s+(\w+)\s*=\s*(\[.*?\]|{.*?}|\d+|'[^']*'|"[^"]*");`)
+// jsVarRe matches SwOS JS variable assignments.
+// (?s) enables dot-matches-newline so arrays spanning multiple lines are captured.
+var jsVarRe = regexp.MustCompile(`(?s)var\s+(\w+)\s*=\s*(\[.*?\]|\{.*?\}|\d+|'[^']*'|"[^"]*");`)
 
 func (a *MikroTikSwOSAdapter) parseSystemPage(page string) map[string]interface{} {
 	result := map[string]interface{}{}
@@ -816,6 +824,28 @@ func ucFirst(s string) string {
 		return s
 	}
 	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+// isSwOSDataPage returns true if the response body looks like a real SwOS
+// data page (contains at least one JS variable assignment using SwOS
+// short-name conventions). Auth redirect pages return HTML — they pass
+// HTTP 200 but contain no JS vars.
+func isSwOSDataPage(body []byte) bool {
+	s := string(body)
+	// Must contain at least one JS var assignment
+	if !strings.Contains(s, "var ") {
+		return false
+	}
+	// Must NOT look like an HTML login page
+	lower := strings.ToLower(s)
+	if strings.Contains(lower, "<html") ||
+		strings.Contains(lower, "<!doctype") ||
+		strings.Contains(lower, "<form") ||
+		strings.Contains(lower, "login") {
+		return false
+	}
+	// Must contain at least one recognisable SwOS data token
+	return strings.Contains(s, "=[") || jsVarRe.MatchString(s)
 }
 
 
