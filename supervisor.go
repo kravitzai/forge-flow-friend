@@ -395,6 +395,19 @@ func (s *Supervisor) UpdateTarget(profile TargetProfile) error {
 				profile.CredentialRef = s.state.Targets[i].CredentialRef
 			}
 
+			// Clear failed/paused status so reconciler starts a fresh worker.
+			// A config update is an explicit signal to retry, regardless of
+			// the previous worker state or cloud-side status field.
+			if profile.Status == TargetStatusError || profile.Status == TargetStatusPaused ||
+				profile.Status == TargetStatusDegraded {
+				profile.Status = TargetStatusPending
+			}
+			profile.Paused = false
+
+			// Clear retry backoff tracking so reconciler doesn't skip this target
+			delete(s.failedRetryAt, profile.TargetID)
+			delete(s.failedRetries, profile.TargetID)
+
 			profile.UpdatedAt = time.Now()
 			s.state.Targets[i] = profile
 			found = true
