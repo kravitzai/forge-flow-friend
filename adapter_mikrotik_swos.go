@@ -38,11 +38,12 @@ type MikroTikSwOSAdapter struct {
 	snmpTarget string // optional SNMP augmentation target
 	// Preemptive auth — populated after first successful digest/basic
 	// handshake so all subsequent requests skip the 401 round-trip.
-	authScheme string // "digest", "basic", ""
+	authScheme string // "digest", "basic", "form", ""
 	authRealm  string // digest realm
 	authNonce  string // last good nonce
 	authOpaque string // digest opaque
 	authQop    string // digest qop
+	pathStyle  string // "bang" (/!x.b) or "lite" (/x)
 }
 
 var digestAuthParamRe = regexp.MustCompile(`(\w+)=("([^"]*)"|[^,]+)`)
@@ -105,22 +106,37 @@ func (a *MikroTikSwOSAdapter) Init(profile *TargetProfile, creds map[string]stri
 // the response body actually contains JS variable data, not an auth
 // redirect (which also returns HTTP 200 on some firmware versions).
 func (a *MikroTikSwOSAdapter) swosLogin() error {
-	candidates := []string{
-		"/!link.b",  // port link state — present on all SwOS, small payload
-		"/!dhost.b", // system identity — most CRS/CSS models
-		"/!stats.b", // port stats — fallback
-		"/sys.b",    // legacy SwOS
+	// SwOS path families:
+	// "bang" = CRS/CloudRouter: /!link.b /!dhost.b
+	// "lite" = CSS/SwOS Lite:  /link /sys /stat
+	type candidate struct {
+		path      string
+		pathStyle string
 	}
-	for _, path := range candidates {
-		body, err := a.swosGet(path)
+	candidates := []candidate{
+		// SwOS Lite (CSS326, CSS610 etc) — try first because these
+		// devices also respond to bang paths with HTML catch-all
+		// (false positive).
+		{"/link", "lite"},
+		{"/sys", "lite"},
+		{"/stat", "lite"},
+		// SwOS CRS/CloudRouter
+		{"/!link.b", "bang"},
+		{"/!dhost.b", "bang"},
+		{"/!stats.b", "bang"},
+	}
+	for _, c := range candidates {
+		body, err := a.swosGet(c.path)
 		if err != nil {
+			// 404 or network error — try next
 			continue
 		}
 		if isSwOSDataPage(body) {
-			log.Printf("[mikrotik-swos:%s] Auth confirmed via %s (%d bytes)", a.profile.Name, path, len(body))
+			log.Printf("[mikrotik-swos:%s] Auth confirmed via %s (%d bytes, style=%s)", a.profile.Name, c.path, len(body), c.pathStyle)
+			a.pathStyle = c.pathStyle
 			return nil
 		}
-		log.Printf("[mikrotik-swos:%s] %s returned 200 but no JS data — likely auth redirect, continuing probe", a.profile.Name, path)
+		log.Printf("[mikrotik-swos:%s] %s returned 200 but no JS data, continuing", a.profile.Name, c.path)
 	}
 	// ── Fallback: form-based POST login ──
 	// Used by SwOS 2.x on CRS series devices that do not use HTTP digest/basic auth.
@@ -129,6 +145,40 @@ func (a *MikroTikSwOSAdapter) swosLogin() error {
 		return nil
 	}
 	return fmt.Errorf("SwOS auth probe: no candidate page returned valid JS data — check credentials and device reachability")
+}
+
+// swosPageMap returns the correct URL path map based on the detected pathStyle.
+func (a *MikroTikSwOSAdapter) swosPageMap() map[string]string {
+	if a.pathStyle == "lite" {
+		// CSS series SwOS Lite paths
+		return map[string]string{
+			"system": "/sys",
+			"link":   "/link",
+			"stats":  "/stat",
+			"sfp":    "/sfp",
+			"vlan":   "/vlan",
+			"fwd":    "/fwd",
+			"lag":    "/lag",
+			"rstp":   "/rstp",
+			"hosts":  "/host",
+			"snmp":   "/snmp",
+		}
+	}
+	// Default: CRS/CloudRouter bang paths
+	return map[string]string{
+		"system": "/!dhost.b",
+		"link":   "/!link.b",
+		"stats":  "/!stats.b",
+		"sfp":    "/!sfp.b",
+		"poe":    "/!poe.b",
+		"vlan":   "/!vlan.b",
+		"fwd":    "/!fwd.b",
+		"lag":    "/!lag.b",
+		"rstp":   "/!rstp.b",
+		"hosts":  "/!host.b",
+		"acl":    "/!acl.b",
+		"snmp":   "/!snmp.b",
+	}
 }
 
 // swosFormLogin attempts web-form-based login used by SwOS 2.x on CRS series
@@ -174,12 +224,20 @@ func (a *MikroTikSwOSAdapter) swosFormLogin() error {
 		log.Printf("[mikrotik-swos:%s] Form POST %s completed (final HTTP %d)", a.profile.Name, ep.path, resp.StatusCode)
 
 		// Verify: data page must return JS content
-		probes := []string{"/!link.b", "/!dhost.b", "/!stats.b"}
+		type probeEntry struct {
+			path      string
+			pathStyle string
+		}
+		probes := []probeEntry{
+			{"/link", "lite"}, {"/sys", "lite"},
+			{"/!link.b", "bang"}, {"/!dhost.b", "bang"},
+		}
 		for _, probe := range probes {
-			pbody, perr := a.swosGet(probe)
+			pbody, perr := a.swosGet(probe.path)
 			if perr == nil && isSwOSDataPage(pbody) {
-				log.Printf("[mikrotik-swos:%s] Form login via %s confirmed by %s (%d bytes)", a.profile.Name, ep.path, probe, len(pbody))
+				log.Printf("[mikrotik-swos:%s] Form login via %s confirmed by %s (%d bytes)", a.profile.Name, ep.path, probe.path, len(pbody))
 				a.authScheme = "form"
+				a.pathStyle = probe.pathStyle
 				return nil
 			}
 		}
@@ -452,20 +510,7 @@ func (a *MikroTikSwOSAdapter) Collect() (map[string]interface{}, error) {
 	raw := make(map[string]interface{})
 
 	// ── Fetch all available SwOS pages ──
-	pageMap := map[string]string{
-		"system":  "/!dhost.b",
-		"link":    "/!link.b",
-		"stats":   "/!stats.b",
-		"sfp":     "/!sfp.b",
-		"poe":     "/!poe.b",
-		"vlan":    "/!vlan.b",
-		"fwd":     "/!fwd.b",
-		"lag":     "/!lag.b",
-		"rstp":    "/!rstp.b",
-		"hosts":   "/!host.b",
-		"acl":     "/!acl.b",
-		"snmp":    "/!snmp.b",
-	}
+	pageMap := a.swosPageMap()
 
 	rawPages := make(map[string]string)
 	capabilities := make(map[string]bool)
@@ -650,23 +695,35 @@ func (a *MikroTikSwOSAdapter) parseSystemPage(page string) map[string]interface{
 
 	// SwOS system page exports JS vars: nm, mac, brd, ver, bld, etc.
 	kvPairs := extractJSVars(page)
-	if v, ok := kvPairs["nm"]; ok {
+
+	// Primary keys (CRS /!dhost.b style)
+	// Fallback keys (CSS /sys style)
+	strOr := func(keys ...string) string {
+		for _, k := range keys {
+			if v, ok := kvPairs[k]; ok && v != "" {
+				return v
+			}
+		}
+		return ""
+	}
+
+	if v := strOr("nm", "id", "name"); v != "" {
 		result["deviceName"] = v
 	}
-	if v, ok := kvPairs["mac"]; ok {
+	if v := strOr("mac", "MAC"); v != "" {
 		result["macAddress"] = v
 	}
-	if v, ok := kvPairs["brd"]; ok {
+	if v := strOr("brd", "board", "type"); v != "" {
 		result["board"] = v
 		result["model"] = v
 	}
-	if v, ok := kvPairs["ver"]; ok {
+	if v := strOr("ver", "version"); v != "" {
 		result["version"] = v
 	}
-	if v, ok := kvPairs["bld"]; ok {
+	if v := strOr("bld", "build"); v != "" {
 		result["build"] = v
 	}
-	if v, ok := kvPairs["upn"]; ok {
+	if v := strOr("upn", "uptime"); v != "" {
 		result["uptime"] = v
 	}
 
