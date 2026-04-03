@@ -84,9 +84,9 @@ func (b *BackendClient) Post(token string, payload map[string]interface{}) error
 	case 200, 201, 202:
 		return nil
 	case 401:
-		return fmt.Errorf("authentication failed — token may be invalid or revoked")
+		return &AuthError{Msg: "authentication failed — token may be invalid or revoked"}
 	case 403:
-		return fmt.Errorf("connector has been revoked by administrator")
+		return &AuthError{Msg: "connector has been revoked by administrator"}
 	default:
 		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
@@ -198,6 +198,13 @@ func (b *BackendClient) SendAcknowledgement(token string, ack AckPayload) error 
 
 	return nil
 }
+
+// AuthError is returned when the backend rejects a request due to
+// invalid or revoked credentials (401/403). It indicates the backend
+// is reachable but the token is bad — distinct from connectivity errors.
+type AuthError struct{ Msg string }
+
+func (e *AuthError) Error() string { return e.Msg }
 
 // wrapConnectivityError provides actionable guidance for common network failures.
 func wrapConnectivityError(op string, err error) error {

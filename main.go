@@ -227,6 +227,10 @@ func main() {
 	uqCfg := DefaultUploadQueueConfig()
 	uqCfg.LocalDB = store.LocalDB()
 	uploadQueue := NewUploadQueue(backend, uqCfg)
+	// Set connector token so replayed snapshots use valid credentials
+	if token := supervisor.GetConnectorToken(); token != "" {
+		uploadQueue.connectorToken = token
+	}
 	uploadQueue.Start()
 	supervisor.SetUploadQueue(uploadQueue)
 

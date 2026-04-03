@@ -8,6 +8,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -56,6 +57,9 @@ type UploadQueue struct {
 	backendOnline   bool
 	backendOnlineMu sync.Mutex
 	onReconnect     func() // called once on first success after outage
+
+	// Token for replayed snapshots
+	connectorToken string
 }
 
 // UploadQueueConfig configures the upload queue.
@@ -228,7 +232,14 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 		err := q.backend.Post(item.Token, item.Payload)
 		if err != nil {
 			agentMetrics.RecordUploadFailure()
-			q.markOffline()
+
+			// Only mark offline for connectivity errors, NOT auth errors.
+			// Auth errors (401/403) mean the backend is reachable.
+			var authErr *AuthError
+			if !errors.As(err, &authErr) {
+				q.markOffline()
+			}
+
 			item.Retries++
 
 			if item.Retries >= q.maxRetries {
@@ -382,7 +393,7 @@ func (q *UploadQueue) ReplayUnsynced() {
 		snap.Payload["type"] = "snapshot"
 		snap.Payload["targetId"] = snap.TargetID
 		snap.Payload["targetType"] = snap.TargetType
-		q.Enqueue("", snap.Payload, PriorityLow)
+		q.Enqueue(q.connectorToken, snap.Payload, PriorityLow)
 	}
 }
 
