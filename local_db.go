@@ -297,33 +297,88 @@ func (d *LocalDB) MarkSynced(snapshotID string) error {
 	return err
 }
 
-// MarkLegacySynced marks all snapshots collected
-// before startTime as synced. Called once at startup
-// to clear legacy unsynced_count from before
-// MarkSynced was wired in upload_queue.go.
+// MarkLegacySynced is deprecated — retained as a no-op for
+// backward compatibility. Unsynced snapshots are now replayed
+// on reconnect instead of being discarded.
 func (d *LocalDB) MarkLegacySynced(
 	startTime time.Time,
 ) (int64, error) {
+	return 0, nil
+}
+
+// UnsyncedSnapshots returns up to `limit` snapshots that have
+// not been marked as synced, ordered oldest-first. Each row
+// includes the decrypted payload so the upload queue can
+// replay them to the cloud.
+type UnsyncedSnapshot struct {
+	ID          string
+	TargetID    string
+	TargetType  string
+	CollectedAt time.Time
+	Payload     map[string]interface{}
+}
+
+func (d *LocalDB) UnsyncedSnapshots(limit int) ([]UnsyncedSnapshot, error) {
 	if d == nil || !d.enabled {
-		return 0, nil
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
 	}
 
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	res, err := d.db.Exec(`
-		UPDATE snapshots
-		SET    synced_at =
-		         strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		WHERE  synced_at IS NULL
-		AND    collected_at < ?
-	`, startTime.UTC().Format(time.RFC3339Nano))
+	rows, err := d.db.Query(`
+		SELECT id, target_id, target_type, collected_at, payload_enc
+		FROM snapshots
+		WHERE synced_at IS NULL
+		ORDER BY collected_at ASC
+		LIMIT ?
+	`, limit)
 	if err != nil {
-		return 0, err
+		return nil, fmt.Errorf("local_db: query unsynced: %w", err)
 	}
+	defer rows.Close()
 
-	n, _ := res.RowsAffected()
-	return n, nil
+	var results []UnsyncedSnapshot
+	for rows.Next() {
+		var id, targetID, targetType, collectedAtStr string
+		var enc []byte
+		if err := rows.Scan(&id, &targetID, &targetType, &collectedAtStr, &enc); err != nil {
+			return nil, fmt.Errorf("local_db: scan unsynced: %w", err)
+		}
+		raw, err := d.store.decrypt(enc)
+		if err != nil {
+			// Skip corrupted rows
+			continue
+		}
+		var payload map[string]interface{}
+		if err := json.Unmarshal(raw, &payload); err != nil {
+			continue
+		}
+		collectedAt, _ := time.Parse(time.RFC3339Nano, collectedAtStr)
+		results = append(results, UnsyncedSnapshot{
+			ID:          id,
+			TargetID:    targetID,
+			TargetType:  targetType,
+			CollectedAt: collectedAt,
+			Payload:     payload,
+		})
+	}
+	return results, nil
+}
+
+// UnsyncedCount returns the number of snapshots not yet synced.
+func (d *LocalDB) UnsyncedCount() int64 {
+	if d == nil || !d.enabled {
+		return 0
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var count int64
+	d.db.QueryRow("SELECT COUNT(*) FROM snapshots WHERE synced_at IS NULL").Scan(&count)
+	return count
 }
 
 // GetSnapshotSummary returns the pre-computed

@@ -488,12 +488,26 @@ func (s *LocalAPIServer) handleSnapshot(
 		return
 	}
 
-	s.writeJSON(w, http.StatusOK, map[string]interface{}{
+	// Include current worker status so the frontend can detect stale-but-cached scenarios
+	resp := map[string]interface{}{
 		"ok":           true,
 		"target_id":    targetID,
 		"collected_at": collectedAt.UTC().Format(time.RFC3339),
 		"snapshot":     payload,
-	})
+	}
+	if s.supervisor != nil {
+		for _, ws := range s.supervisor.Status() {
+			if ws.TargetID == targetID {
+				resp["worker_status"] = string(ws.Status)
+				if ws.LastError != "" {
+					resp["worker_last_error"] = ws.LastError
+				}
+				break
+			}
+		}
+	}
+
+	s.writeJSON(w, http.StatusOK, resp)
 }
 
 // ── Helpers ──

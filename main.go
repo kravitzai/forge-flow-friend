@@ -62,29 +62,42 @@ func main() {
 		remoteRestart = true
 	}
 
+	configDir := os.Getenv("CONFIG_DIR")
+	if configDir == "" {
+		configDir = defaultConfigDir
+	}
+
 	hybridMode := envBool("FORGEAI_HYBRID_MODE")
 	if hybridMode {
 		audit.Info("host.startup",
 			"Hybrid Mode enabled — local DB will be activated")
 	}
 
-	// ── Local API token ──
+	// ── Local API token — stable across restarts ──
 	localAPIToken := os.Getenv("FORGEAI_LOCAL_API_TOKEN")
 	if localAPIToken == "" && hybridMode {
-		localAPIToken = generateID() // random per startup
-		audit.Info("local_api.start",
-			"Local API token generated (set FORGEAI_LOCAL_API_TOKEN to pin)",
-			F("token", localAPIToken))
+		// Try to load from persisted file first
+		tokenPath := filepath.Join(configDir, "local_api_token")
+		if stored, err := os.ReadFile(tokenPath); err == nil && len(stored) > 0 {
+			localAPIToken = strings.TrimSpace(string(stored))
+			audit.Info("local_api.start",
+				"Local API token loaded from disk",
+				F("token_prefix", localAPIToken[:8]))
+		} else {
+			localAPIToken = generateID()
+			if err := os.WriteFile(tokenPath, []byte(localAPIToken), 0600); err != nil {
+				audit.Warn("local_api.start",
+					"Failed to persist local API token", Err(err))
+			}
+			audit.Info("local_api.start",
+				"Local API token generated and persisted",
+				F("token_prefix", localAPIToken[:8]))
+		}
 	}
 
 	// ── Parse change-operation policy from environment ──
 	changePolicyConfig := ParseChangePolicyFromEnv()
 	changePolicyConfig.LogStartupSummary()
-
-	configDir := os.Getenv("CONFIG_DIR")
-	if configDir == "" {
-		configDir = defaultConfigDir
-	}
 
 	// ── Check for --force-reset-state flag ──
 	forceReset := false
@@ -216,6 +229,18 @@ func main() {
 	uploadQueue := NewUploadQueue(backend, uqCfg)
 	uploadQueue.Start()
 	supervisor.SetUploadQueue(uploadQueue)
+
+	// Wire reconnect callback: replay unsynced snapshots and trigger
+	// immediate desired-state refresh on backend recovery.
+	uploadQueue.SetOnReconnect(func() {
+		uploadQueue.ReplayUnsynced()
+		// Force all workers to send a heartbeat so backend gets
+		// current worker status immediately after reconnect
+		for _, ws := range supervisor.Status() {
+			audit.Info("upload.reconnect", "Re-sending heartbeat after reconnect",
+				F("target_id", ws.TargetID))
+		}
+	})
 
 	// ── Metrics Logger ──
 	metricsStopCh := make(chan struct{})

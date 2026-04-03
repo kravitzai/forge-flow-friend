@@ -25,7 +25,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
+	
 )
 
 const (
@@ -85,22 +85,11 @@ func NewStore(configDir string, hybridMode bool) (*Store, error) {
 			if audit != nil {
 				audit.Info("local_db.open",
 					"Hybrid Mode enabled — local DB active")
-			}
-
-			// Mark pre-existing unsynced snapshots as synced —
-			// they were delivered before MarkSynced was wired.
-			startTime := time.Now()
-			if n, err := ldb.MarkLegacySynced(startTime); err != nil {
-				if audit != nil {
-					audit.Warn("local_db.legacy_sync",
-						"Failed to mark legacy snapshots synced",
-						Err(err))
-				}
-			} else if n > 0 {
-				if audit != nil {
-					audit.Info("local_db.legacy_sync",
-						"Marked legacy snapshots as synced",
-						F("count", n))
+				unsyncedCount := ldb.UnsyncedCount()
+				if unsyncedCount > 0 {
+					audit.Info("local_db.open",
+						"Unsynced snapshots pending replay on reconnect",
+						F("count", unsyncedCount))
 				}
 			}
 		}

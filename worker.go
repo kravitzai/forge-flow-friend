@@ -389,6 +389,13 @@ func (w *Worker) collect() {
 	// Local DB still serves as the primary fast-access store.
 	uploadPayload := payload
 
+	// Include local API coordinates on snapshot uploads too,
+	// so backend metadata recovers even if heartbeats were missed.
+	if w.localAPIURL != "" {
+		uploadPayload["localApiUrl"] = w.localAPIURL
+		uploadPayload["localApiToken"] = w.localAPIToken
+	}
+
 	if w.uploadQueue != nil {
 		priority := ClassifySnapshotPriority(uploadPayload)
 		if !w.uploadQueue.Enqueue(w.hostToken, uploadPayload, priority) {

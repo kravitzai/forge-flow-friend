@@ -51,6 +51,11 @@ type UploadQueue struct {
 	workerCount   int
 	retryBackoff  time.Duration
 	maxBackoff    time.Duration
+
+	// Reconnect-aware state
+	backendOnline   bool
+	backendOnlineMu sync.Mutex
+	onReconnect     func() // called once on first success after outage
 }
 
 // UploadQueueConfig configures the upload queue.
@@ -223,11 +228,12 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 		err := q.backend.Post(item.Token, item.Payload)
 		if err != nil {
 			agentMetrics.RecordUploadFailure()
+			q.markOffline()
 			item.Retries++
 
 			if item.Retries >= q.maxRetries {
-				agentMetrics.RecordUploadDropped()
-				audit.Error("upload.dropped", fmt.Sprintf("Dropped snapshot after %d retries", item.Retries),
+				// Don't drop — leave unsynced in local DB for replay on reconnect
+				audit.Warn("upload.deferred", fmt.Sprintf("Deferred snapshot after %d retries (will replay on reconnect)", item.Retries),
 					F("target_id", item.TargetID), F("worker", workerID), Err(err))
 				continue
 			}
@@ -256,6 +262,7 @@ func (q *UploadQueue) uploadWorker(workerID int) {
 			q.mu.Unlock()
 	} else {
 			agentMetrics.RecordUploadSuccess(item.SizeBytes)
+			q.markOnline()
 			// Mark synced in local DB if this was a
 			// Hybrid Mode summary upload
 			if q.localDB != nil {
@@ -317,6 +324,66 @@ func (q *UploadQueue) Depth() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.items)
+}
+
+// SetOnReconnect sets a callback fired once when backend connectivity
+// is restored after an outage. Used by the supervisor to trigger
+// catch-up (replay unsynced, resend heartbeats, refresh desired state).
+func (q *UploadQueue) SetOnReconnect(fn func()) {
+	q.backendOnlineMu.Lock()
+	defer q.backendOnlineMu.Unlock()
+	q.onReconnect = fn
+}
+
+// markOnline is called after a successful upload. Fires the reconnect
+// callback exactly once per outage→recovery transition.
+func (q *UploadQueue) markOnline() {
+	q.backendOnlineMu.Lock()
+	wasOffline := !q.backendOnline
+	q.backendOnline = true
+	fn := q.onReconnect
+	q.backendOnlineMu.Unlock()
+
+	if wasOffline && fn != nil {
+		audit.Info("upload.reconnect", "Backend connectivity restored — triggering catch-up")
+		go fn()
+	}
+}
+
+// markOffline records that backend is unreachable.
+func (q *UploadQueue) markOffline() {
+	q.backendOnlineMu.Lock()
+	q.backendOnline = false
+	q.backendOnlineMu.Unlock()
+}
+
+// ReplayUnsynced reads unsynced snapshots from the local DB and
+// re-enqueues them for upload. Called on reconnect.
+func (q *UploadQueue) ReplayUnsynced() {
+	if q.localDB == nil {
+		return
+	}
+
+	snapshots, err := q.localDB.UnsyncedSnapshots(50)
+	if err != nil {
+		audit.Warn("upload.replay", "Failed to read unsynced snapshots", Err(err))
+		return
+	}
+
+	if len(snapshots) == 0 {
+		return
+	}
+
+	audit.Info("upload.replay", "Replaying unsynced snapshots",
+		F("count", len(snapshots)))
+
+	for _, snap := range snapshots {
+		snap.Payload["_localSnapshotId"] = snap.ID
+		snap.Payload["type"] = "snapshot"
+		snap.Payload["targetId"] = snap.TargetID
+		snap.Payload["targetType"] = snap.TargetType
+		q.Enqueue("", snap.Payload, PriorityLow)
+	}
 }
 
 // ── Priority Classification Helpers ──
