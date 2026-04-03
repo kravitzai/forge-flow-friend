@@ -140,9 +140,26 @@ func (a *MikroTikSwOSAdapter) swosRequest(method, path string, body []byte, cont
 		}
 		log.Printf("[mikrotik-swos:%s] Retrying %s with %s auth", a.profile.Name, path, scheme)
 
-		resp, err = a.doSwOSRequest(method, path, body, contentType, authHeader)
+		// First retry: establishes session cookie on newer SwOS firmware.
+		// The response may be a landing page, not data.
+		authResp, authRetryErr := a.doSwOSRequest(method, path, body, contentType, authHeader)
+		if authRetryErr != nil {
+			return nil, fmt.Errorf("%s %s auth: %w", method, path, authRetryErr)
+		}
+		// Drain and close — session cookie is now stored in the jar regardless of content.
+		_, _ = io.Copy(io.Discard, authResp.Body)
+		authResp.Body.Close()
+
+		if authResp.StatusCode == http.StatusUnauthorized || authResp.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("HTTP %d after %s auth", authResp.StatusCode, scheme)
+		}
+
+		// Second request: session cookie is sent automatically by the jar.
+		// This is the actual data response.
+		log.Printf("[mikrotik-swos:%s] Session established via %s, fetching %s", a.profile.Name, scheme, path)
+		resp, err = a.doSwOSRequest(method, path, body, contentType, "")
 		if err != nil {
-			return nil, fmt.Errorf("%s %s retry: %w", method, path, err)
+			return nil, fmt.Errorf("%s %s session fetch: %w", method, path, err)
 		}
 	}
 	defer resp.Body.Close()
