@@ -683,9 +683,13 @@ func (a *MikroTikSwOSAdapter) TargetType() string {
 
 // ── Page Parsers ──
 
-// jsVarRe matches SwOS JS variable assignments.
+// jsVarRe matches SwOS JS variable assignments with "var" keyword.
 // (?s) enables dot-matches-newline so arrays spanning multiple lines are captured.
 var jsVarRe = regexp.MustCompile(`(?s)var\s+(\w+)\s*=\s*(\[.*?\]|\{.*?\}|\d+|'[^']*'|"[^"]*");`)
+
+// jsBareRe matches bare JS assignments without "var" keyword (CSS326 SwOS-Lite).
+// e.g. nm=['ether1','ether2']; or lnk=[1,0,1,0]; or brd='CSS326-24G-2S+';
+var jsBareRe = regexp.MustCompile(`(?s)(?:^|[;\n])\s*(\w+)\s*=\s*(\[.*?\]|\{.*?\}|\d+|'[^']*'|"[^"]*");`)
 
 func (a *MikroTikSwOSAdapter) parseSystemPage(page string) map[string]interface{} {
 	result := map[string]interface{}{}
@@ -968,11 +972,23 @@ func extractSwOSSignals(snapshot map[string]interface{}) []SnapshotSignal {
 
 func extractJSVars(page string) map[string]string {
 	result := make(map[string]string)
+	// First pass: standard "var x = ...;" assignments
 	matches := jsVarRe.FindAllStringSubmatch(page, -1)
 	for _, m := range matches {
 		if len(m) == 3 {
 			val := strings.Trim(m[2], "'\"")
 			result[m[1]] = val
+		}
+	}
+	// Second pass: bare "x = ...;" assignments (CSS326 SwOS-Lite)
+	bareMatches := jsBareRe.FindAllStringSubmatch(page, -1)
+	for _, m := range bareMatches {
+		if len(m) == 3 {
+			key := m[1]
+			if _, exists := result[key]; !exists {
+				val := strings.Trim(m[2], "'\"")
+				result[key] = val
+			}
 		}
 	}
 	return result
@@ -1031,15 +1047,11 @@ func ucFirst(s string) string {
 }
 
 // isSwOSDataPage returns true if the response body looks like a real SwOS
-// data page (contains at least one JS variable assignment using SwOS
-// short-name conventions). Auth redirect pages return HTML — they pass
-// HTTP 200 but contain no JS vars.
+// data page containing JS variable assignments (either "var x=..." or bare
+// "x=...;" style used by CSS326 SwOS-Lite). Auth redirect pages return
+// HTML — they pass HTTP 200 but contain no JS vars.
 func isSwOSDataPage(body []byte) bool {
 	s := string(body)
-	// Must contain at least one JS var assignment
-	if !strings.Contains(s, "var ") {
-		return false
-	}
 	// Must NOT look like an HTML login page
 	lower := strings.ToLower(s)
 	if strings.Contains(lower, "<html") ||
@@ -1048,8 +1060,15 @@ func isSwOSDataPage(body []byte) bool {
 		strings.Contains(lower, "login") {
 		return false
 	}
-	// Must contain at least one recognisable SwOS data token
-	return strings.Contains(s, "=[") || jsVarRe.MatchString(s)
+	// Check for standard "var" assignments
+	if strings.Contains(s, "var ") && (strings.Contains(s, "=[") || jsVarRe.MatchString(s)) {
+		return true
+	}
+	// Check for bare assignments (CSS326 SwOS-Lite: nm=['...'];)
+	if jsBareRe.MatchString(s) {
+		return true
+	}
+	return false
 }
 
 
