@@ -164,10 +164,25 @@ func (a *MikroTikSwOSAdapter) swosFormLogin() error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
-		// Accept 200 or 302 — both can indicate successful form login on SwOS
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusFound {
+		// Accept 200, 302, or 303 — all can indicate successful form login on SwOS
+		accepted := resp.StatusCode == http.StatusOK ||
+			resp.StatusCode == http.StatusFound ||
+			resp.StatusCode == http.StatusSeeOther // 303
+		if !accepted {
 			log.Printf("[mikrotik-swos:%s] Form POST %s returned %d, skipping", a.profile.Name, ep.path, resp.StatusCode)
 			continue
+		}
+		log.Printf("[mikrotik-swos:%s] Form POST %s accepted (HTTP %d)", a.profile.Name, ep.path, resp.StatusCode)
+
+		// If the login response was a redirect, follow it once (redirect
+		// following was disabled) so any cookies on the target page are
+		// also captured by the jar.
+		if loc := resp.Header.Get("Location"); loc != "" {
+			a.client.CheckRedirect = prevRedirect
+			if followResp, followErr := a.doSwOSRequest(http.MethodGet, loc, nil, "", ""); followErr == nil {
+				_, _ = io.Copy(io.Discard, followResp.Body)
+				followResp.Body.Close()
+			}
 		}
 
 		// Verify the login worked by fetching a data page and checking for JS content
