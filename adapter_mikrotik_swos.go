@@ -137,26 +137,33 @@ func (a *MikroTikSwOSAdapter) swosLogin() error {
 // without any Authorization header.
 func (a *MikroTikSwOSAdapter) swosFormLogin() error {
 	endpoints := []struct {
-		path        string
-		bodyFmt     string
-		contentType string
+		path    string
+		bodyFmt string
 	}{
-		{"/", "username=%s&password=%s", "application/x-www-form-urlencoded"},
-		{"/login", "username=%s&password=%s", "application/x-www-form-urlencoded"},
-		{"/!auth.b", "username=%s&password=%s", "application/x-www-form-urlencoded"},
+		{"/", "username=%s&password=%s"},
+		{"/login", "username=%s&password=%s"},
+		{"/!auth.b", "username=%s&password=%s"},
 	}
 	for _, ep := range endpoints {
 		formBody := fmt.Sprintf(ep.bodyFmt, a.user, a.pass)
-		body := []byte(formBody)
 
-		// Disable redirect following so we can inspect the Set-Cookie on the 302
-		prevRedirect := a.client.CheckRedirect
-		a.client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-			return http.ErrUseLastResponse
+		// Allow redirect following — the session cookie is set on the
+		// redirect target GET, not on the POST response itself.
+		// The cookie jar captures every Set-Cookie in the full redirect
+		// chain automatically.
+		req, err := http.NewRequest(
+			http.MethodPost,
+			a.baseURL+ep.path,
+			strings.NewReader(formBody))
+		if err != nil {
+			continue
 		}
-		resp, err := a.doSwOSRequest(http.MethodPost, ep.path, body, ep.contentType, "")
-		a.client.CheckRedirect = prevRedirect
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+		req.Header.Set("Referer", a.baseURL+"/")
+		req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ForgeAI/1.0)")
 
+		resp, err := a.client.Do(req)
 		if err != nil {
 			log.Printf("[mikrotik-swos:%s] Form POST %s failed: %v", a.profile.Name, ep.path, err)
 			continue
@@ -164,28 +171,9 @@ func (a *MikroTikSwOSAdapter) swosFormLogin() error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
-		// Accept 200, 302, or 303 — all can indicate successful form login on SwOS
-		accepted := resp.StatusCode == http.StatusOK ||
-			resp.StatusCode == http.StatusFound ||
-			resp.StatusCode == http.StatusSeeOther // 303
-		if !accepted {
-			log.Printf("[mikrotik-swos:%s] Form POST %s returned %d, skipping", a.profile.Name, ep.path, resp.StatusCode)
-			continue
-		}
-		log.Printf("[mikrotik-swos:%s] Form POST %s accepted (HTTP %d)", a.profile.Name, ep.path, resp.StatusCode)
+		log.Printf("[mikrotik-swos:%s] Form POST %s completed (final HTTP %d)", a.profile.Name, ep.path, resp.StatusCode)
 
-		// If the login response was a redirect, follow it once (redirect
-		// following was disabled) so any cookies on the target page are
-		// also captured by the jar.
-		if loc := resp.Header.Get("Location"); loc != "" {
-			a.client.CheckRedirect = prevRedirect
-			if followResp, followErr := a.doSwOSRequest(http.MethodGet, loc, nil, "", ""); followErr == nil {
-				_, _ = io.Copy(io.Discard, followResp.Body)
-				followResp.Body.Close()
-			}
-		}
-
-		// Verify the login worked by fetching a data page and checking for JS content
+		// Verify: data page must return JS content
 		probes := []string{"/!link.b", "/!dhost.b", "/!stats.b"}
 		for _, probe := range probes {
 			pbody, perr := a.swosGet(probe)
@@ -195,7 +183,7 @@ func (a *MikroTikSwOSAdapter) swosFormLogin() error {
 				return nil
 			}
 		}
-		log.Printf("[mikrotik-swos:%s] Form POST %s accepted but data pages still return no JS content", a.profile.Name, ep.path)
+		log.Printf("[mikrotik-swos:%s] Form POST %s completed but data pages still return no JS content", a.profile.Name, ep.path)
 	}
 	return fmt.Errorf("form login failed on all endpoints")
 }
