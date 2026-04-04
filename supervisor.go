@@ -29,6 +29,10 @@ type Supervisor struct {
 	localAPIToken string                 // pre-shared token for local API
 	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
 	failedRetries map[string]int         // targetID -> consecutive retry count
+	// lastDegradedLog rate-limits the agent.degraded
+	// warning so it fires at most once per 5 minutes
+	// instead of every watchdog scan.
+	lastDegradedLog time.Time
 }
 
 // NewSupervisor creates a new supervisor with the given store and backend.
@@ -605,6 +609,54 @@ func (s *Supervisor) RunWatchdog(ctx context.Context) {
 	}
 }
 
+// RunLocalReconcile runs a periodic local reconcile loop that retries
+// failed workers without requiring cloud connectivity. This covers the
+// edge case where the agent starts while targets are unreachable and
+// the cloud sync loop is also down (e.g. DNS failure).
+//
+// Call in a goroutine after Reconcile():
+//
+//	go supervisor.RunLocalReconcile(ctx)
+func (s *Supervisor) RunLocalReconcile(ctx context.Context) {
+	// Initial grace period so cloud sync has a chance to run first.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(45 * time.Second):
+	}
+
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			// Only run if there are actually failed workers to retry.
+			hasFailed := false
+			s.mu.RLock()
+			for _, w := range s.workers {
+				if w.State().Status == WorkerStatusFailed {
+					hasFailed = true
+					break
+				}
+			}
+			s.mu.RUnlock()
+
+			if !hasFailed {
+				continue
+			}
+
+			audit.Info("sync.reconciled",
+				"Local reconcile — retrying failed workers (cloud sync may be unavailable)")
+			if err := s.Reconcile(); err != nil {
+				audit.Warn("sync.error", "Local reconcile failed", Err(err))
+			}
+		}
+	}
+}
+
 func (s *Supervisor) watchdogScan() {
 	s.mu.RLock()
 	workers := make(map[string]*Worker, len(s.workers))
@@ -731,12 +783,20 @@ func (s *Supervisor) watchdogScan() {
 	}
 	pct := float64(unhealthy) / float64(total)
 	if pct >= 0.40 {
-		audit.Warn("agent.degraded",
-			"Agent health degraded — majority of workers unhealthy",
-			F("unhealthy_workers", unhealthy),
-			F("total_workers", total),
-			F("pct", int(pct*100)),
-		)
+		s.mu.Lock()
+		shouldLog := time.Since(s.lastDegradedLog) > 5*time.Minute
+		if shouldLog {
+			s.lastDegradedLog = time.Now()
+		}
+		s.mu.Unlock()
+		if shouldLog {
+			audit.Warn("agent.degraded",
+				"Agent health degraded — majority of workers unhealthy",
+				F("unhealthy_workers", unhealthy),
+				F("total_workers", total),
+				F("pct", int(pct*100)),
+			)
+		}
 	}
 }
 

@@ -328,6 +328,9 @@ func main() {
 	go supervisor.RunWatchdog(watchdogCtx)
 	audit.Info("watchdog.started", "Supervisor watchdog active", F("scan_interval_secs", 20))
 
+	go supervisor.RunLocalReconcile(watchdogCtx)
+	audit.Info("watchdog.started", "Local reconcile loop active", F("interval_secs", 60))
+
 	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
 
 	// Set up signal channel early for use by update goroutine
