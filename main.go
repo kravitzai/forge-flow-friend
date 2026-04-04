@@ -320,6 +320,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Start supervisor-level watchdog.
+	// Separate from the per-collection watchdog in worker.run() —
+	// handles inter-cycle freeze detection using stage + progress timestamps.
+	watchdogCtx, watchdogCancel := context.WithCancel(context.Background())
+	defer watchdogCancel()
+	go supervisor.RunWatchdog(watchdogCtx)
+	audit.Info("watchdog.started", "Supervisor watchdog active", F("scan_interval_secs", 20))
+
 	audit.Info("host.startup", "Active workers started", F("count", supervisor.WorkerCount()))
 
 	// Set up signal channel early for use by update goroutine

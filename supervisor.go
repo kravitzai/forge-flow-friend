@@ -7,6 +7,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"sync"
@@ -558,6 +559,127 @@ func (s *Supervisor) Shutdown() {
 	}
 
 	audit.Info("host.shutdown", "All workers stopped")
+}
+
+// RunWatchdog starts the supervisor-level watchdog loop. It runs
+// independently of the per-collection watchdog in worker.run() —
+// that watchdog handles hung collect() calls, this one handles
+// workers that are frozen between cycles or mid-stage beyond
+// their expected duration.
+//
+// Call in a goroutine after Reconcile():
+//
+//	go supervisor.RunWatchdog(ctx)
+func (s *Supervisor) RunWatchdog(ctx context.Context) {
+	ticker := time.NewTicker(20 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.watchdogScan()
+		}
+	}
+}
+
+func (s *Supervisor) watchdogScan() {
+	s.mu.RLock()
+	workers := make(map[string]*Worker, len(s.workers))
+	for k, v := range s.workers {
+		workers[k] = v
+	}
+	s.mu.RUnlock()
+
+	now := time.Now()
+
+	for targetID, w := range workers {
+		ws := w.State()
+
+		// Skip workers in terminal / inactive states
+		if ws.Status == WorkerStatusStopped ||
+			ws.Status == WorkerStatusPaused ||
+			ws.Status == WorkerStatusFailed {
+			continue
+		}
+
+		// Skip workers intentionally sleeping — they are not frozen.
+		if ws.Status == WorkerStatusIdle || ws.CurrentStage == "sleep" {
+			// Grace: allow 2× poll interval past NextScheduledAt
+			if !ws.NextScheduledAt.IsZero() &&
+				now.Before(ws.NextScheduledAt.Add(120*time.Second)) {
+				continue
+			}
+		}
+
+		// No progress timestamp yet (just started) — initial grace
+		if ws.LastProgressAt.IsZero() {
+			if now.Sub(ws.StartedAt) < 60*time.Second {
+				continue
+			}
+		}
+
+		// Stage-aware stuck thresholds
+		softThreshold, hardThreshold := stageThresholds(ws.CurrentStage)
+		progressAge := now.Sub(ws.LastProgressAt)
+
+		if progressAge < softThreshold {
+			continue // healthy
+		}
+
+		if progressAge < hardThreshold {
+			// Suspect — log but don't restart yet
+			audit.Warn("worker.watchdog_suspect",
+				"Worker progress stalled",
+				append(
+					Target(ws.TargetID, "", ""),
+					F("stage", ws.CurrentStage),
+					F("progress_age_secs", int(progressAge.Seconds())),
+					F("soft_threshold_secs", int(softThreshold.Seconds())),
+				)...)
+			if ws.Status == WorkerStatusRunning {
+				w.setStatus(WorkerStatusDegraded)
+			}
+			continue
+		}
+
+		// Hard threshold exceeded — mark stuck and restart
+		audit.Warn("worker.watchdog_stuck",
+			"Worker stuck — triggering restart",
+			append(
+				Target(ws.TargetID, "", ""),
+				F("stage", ws.CurrentStage),
+				F("progress_age_secs", int(progressAge.Seconds())),
+				F("restart_count", ws.RestartCount),
+			)...)
+
+		w.setStatus(WorkerStatusStuck)
+		w.sendHeartbeat()
+
+		go func(w *Worker, tid string) {
+			if err := w.Restart(); err != nil {
+				audit.Error("worker.watchdog_restart_failed",
+					"Watchdog restart failed",
+					append(Target(tid, "", ""), Err(err))...)
+			} else {
+				audit.Info("worker.watchdog_restarted",
+					"Worker restarted by watchdog",
+					Target(tid, "", "")...)
+			}
+		}(w, targetID)
+	}
+}
+
+// stageThresholds returns soft and hard stuck detection thresholds for a stage.
+func stageThresholds(stage string) (soft, hard time.Duration) {
+	switch stage {
+	case "connect", "upload":
+		return 90 * time.Second, 3 * time.Minute
+	case "fetch", "parse":
+		return 3 * time.Minute, 8 * time.Minute
+	default:
+		return 2 * time.Minute, 5 * time.Minute
+	}
 }
 
 // TargetCount returns the number of configured targets.
