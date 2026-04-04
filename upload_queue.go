@@ -56,7 +56,8 @@ type UploadQueue struct {
 	// Reconnect-aware state
 	backendOnline   bool
 	backendOnlineMu sync.Mutex
-	onReconnect     func() // called once on first success after outage
+	offlineSince    time.Time // zero = online
+	onReconnect     func()    // called once on first success after outage
 
 	// Token for replayed snapshots
 	connectorToken string
@@ -118,6 +119,10 @@ func (q *UploadQueue) Start() {
 		q.wg.Add(1)
 		go q.uploadWorker(i)
 	}
+	// Probe loop: detects backend recovery
+	// independently of upload worker retries.
+	q.wg.Add(1)
+	go q.probeLoop()
 	audit.Info("upload.success", "Upload queue started",
 		F("workers", q.workerCount), F("max_queue", q.maxSize), F("max_retries", q.maxRetries))
 }
@@ -352,6 +357,7 @@ func (q *UploadQueue) markOnline() {
 	q.backendOnlineMu.Lock()
 	wasOffline := !q.backendOnline
 	q.backendOnline = true
+	q.offlineSince = time.Time{} // clear
 	fn := q.onReconnect
 	q.backendOnlineMu.Unlock()
 
@@ -364,8 +370,91 @@ func (q *UploadQueue) markOnline() {
 // markOffline records that backend is unreachable.
 func (q *UploadQueue) markOffline() {
 	q.backendOnlineMu.Lock()
+	if q.backendOnline {
+		q.offlineSince = time.Now()
+	}
 	q.backendOnline = false
 	q.backendOnlineMu.Unlock()
+}
+
+// probeLoop runs when the backend is offline.
+// It periodically probes connectivity so the reconnect
+// callback fires as soon as DNS or network access is
+// restored, even when the upload queue has no pending
+// items to retry.
+func (q *UploadQueue) probeLoop() {
+	defer q.wg.Done()
+
+	// Initial delay — let the upload workers
+	// exhaust their retries first.
+	select {
+	case <-q.stopCh:
+		return
+	case <-time.After(45 * time.Second):
+	}
+
+	backoff := 30 * time.Second
+	const maxProbeBackoff = 5 * time.Minute
+	const transportResetThreshold = 2 * time.Minute
+
+	for {
+		select {
+		case <-q.stopCh:
+			return
+		default:
+		}
+
+		// Only probe when offline.
+		q.backendOnlineMu.Lock()
+		online := q.backendOnline
+		since := q.offlineSince
+		q.backendOnlineMu.Unlock()
+
+		if online {
+			// Backend is up — sleep and re-check.
+			select {
+			case <-q.stopCh:
+				return
+			case <-time.After(15 * time.Second):
+			}
+			backoff = 30 * time.Second // reset on recovery
+			continue
+		}
+
+		// If DNS has been failing for >2 minutes,
+		// replace the transport to clear stale
+		// DNS entries from the connection pool.
+		if !since.IsZero() &&
+			time.Since(since) > transportResetThreshold {
+			q.backend.ResetTransport()
+		}
+
+		err := q.backend.Probe(q.connectorToken)
+		if err == nil {
+			audit.Info("upload.reconnect",
+				"Backend connectivity restored "+
+					"via probe — triggering catch-up")
+			q.markOnline()
+			backoff = 30 * time.Second
+		} else {
+			audit.Debug("backend.probe_failed",
+				"Connectivity probe failed",
+				Err(err))
+			// Exponential backoff, capped at 5m
+			if backoff < maxProbeBackoff {
+				backoff *= 2
+				if backoff > maxProbeBackoff {
+					backoff = maxProbeBackoff
+				}
+			}
+		}
+
+		select {
+		case <-q.stopCh:
+			return
+		case <-time.After(backoff):
+		}
+	}
 }
 
 // ReplayUnsynced reads unsynced snapshots from the local DB and

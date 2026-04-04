@@ -20,6 +20,7 @@ import (
 	"net/http"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,6 +42,7 @@ const (
 // BackendClient handles communication with the ForgeAI backend.
 type BackendClient struct {
 	BaseURL string
+	mu      sync.RWMutex
 	client  *http.Client
 }
 
@@ -54,6 +56,30 @@ func NewBackendClient(baseURL string) *BackendClient {
 		BaseURL: baseURL,
 		client:  NewHTTPClient(nil, nil, 30*time.Second),
 	}
+}
+
+// ResetTransport replaces the HTTP client with a fresh one.
+// Call this after sustained DNS failure to clear stale DNS
+// entries cached in the connection pool. Thread-safe.
+func (b *BackendClient) ResetTransport() {
+	fresh := NewHTTPClient(nil, nil, 30*time.Second)
+	b.mu.Lock()
+	b.client = fresh
+	b.mu.Unlock()
+	audit.Info("backend.transport_reset",
+		"HTTP transport replaced to clear "+
+			"DNS cache after sustained failure")
+}
+
+// Probe sends a minimal POST to the heartbeat endpoint
+// to check backend reachability. Used by the upload
+// queue's probe loop to detect recovery after a DNS outage.
+func (b *BackendClient) Probe(token string) error {
+	payload := map[string]interface{}{
+		"type":         "probe",
+		"agentVersion": HostVersion,
+	}
+	return b.Post(token, payload)
 }
 
 // Post sends a payload to the heartbeat endpoint with the given connector token.
@@ -72,7 +98,10 @@ func (b *BackendClient) Post(token string, payload map[string]interface{}) error
 	req.Header.Set("X-Connector-Token", token)
 	req.Header.Set("X-Agent-Version", HostVersion)
 
-	resp, err := b.client.Do(req)
+	b.mu.RLock()
+	c := b.client
+	b.mu.RUnlock()
+	resp, err := c.Do(req)
 	if err != nil {
 		return wrapConnectivityError("post", err)
 	}
@@ -116,7 +145,10 @@ func (b *BackendClient) FetchDesiredState(token string, capManifestJSON string, 
 		req.Header.Set("X-Host-Public-Key", hostPublicKey)
 	}
 
-	resp, err := b.client.Do(req)
+	b.mu.RLock()
+	c := b.client
+	b.mu.RUnlock()
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, wrapConnectivityError("fetch desired state", err)
 	}
@@ -184,7 +216,10 @@ func (b *BackendClient) SendAcknowledgement(token string, ack AckPayload) error 
 	req.Header.Set("X-Connector-Token", token)
 	req.Header.Set("X-Agent-Version", HostVersion)
 
-	resp, err := b.client.Do(req)
+	b.mu.RLock()
+	c := b.client
+	b.mu.RUnlock()
+	resp, err := c.Do(req)
 	if err != nil {
 		log.Printf("[backend] Ack delivery failed: %v", err)
 		return nil
@@ -234,7 +269,10 @@ func (b *BackendClient) FetchUpdateManifest(token string) (*SignedUpdateManifest
 	req.Header.Set("X-Agent-Platform", fmt.Sprintf("%s/%s", agentPlatform(), agentArch()))
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := b.client.Do(req)
+	b.mu.RLock()
+	c := b.client
+	b.mu.RUnlock()
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("fetch update manifest: %w", err)
 	}
@@ -272,7 +310,10 @@ func (b *BackendClient) CheckCommands(token string) ([]RelayCommand, error) {
 	req.Header.Set("X-Agent-Version", HostVersion)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := b.client.Do(req)
+	b.mu.RLock()
+	c := b.client
+	b.mu.RUnlock()
+	resp, err := c.Do(req)
 	if err != nil {
 		return nil, wrapConnectivityError("check-commands", err)
 	}
