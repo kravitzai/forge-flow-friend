@@ -124,6 +124,11 @@ func (w *Worker) Pause() {
 
 // Restart stops and restarts the worker with a fresh context.
 func (w *Worker) Restart() error {
+	w.mu.Lock()
+	w.state.RestartCount++
+	w.state.LastRestartAt = time.Now()
+	w.mu.Unlock()
+
 	w.Stop()
 
 	// Reset context
@@ -163,6 +168,7 @@ func (w *Worker) run() {
 	}
 
 	audit.Info("adapter.init", "Adapter initialized", w.targetFields()...)
+	w.setStage("idle")
 	w.setStatus(WorkerStatusRunning)
 	audit.Info("worker.started", "Worker running", w.targetFields()...)
 
@@ -210,6 +216,12 @@ func (w *Worker) run() {
 			if w.profile.Paused {
 				continue
 			}
+			// Mark cycle start and stage
+			w.mu.Lock()
+			w.state.CycleStartedAt = time.Now()
+			w.mu.Unlock()
+			w.setStage("scheduled")
+
 			// Run collect with watchdog timeout.
 			// If adapter hangs (e.g. network dropped),
 			// cancel it after WatchdogTimeoutSecs.
@@ -224,7 +236,11 @@ func (w *Worker) run() {
 			}()
 			select {
 			case <-done:
-				// Normal completion
+				// Normal completion — enter sleep stage
+				w.mu.Lock()
+				w.state.NextScheduledAt = time.Now().Add(interval)
+				w.mu.Unlock()
+				w.setStage("sleep")
 			case <-time.After(watchdog):
 				audit.Warn("worker.watchdog",
 					"Collection hung — watchdog fired, restarting worker",
@@ -247,6 +263,7 @@ func (w *Worker) run() {
 // collect performs one collection cycle with retry/backoff handling.
 func (w *Worker) collect() {
 	// Pre-flight health check — fast connectivity validation
+	w.setStage("connect")
 	if err := w.adapter.HealthCheck(); err != nil {
 		audit.Warn("healthcheck.failed", "Target health check failed",
 			append(w.targetFields(), Err(err))...)
@@ -255,6 +272,7 @@ func (w *Worker) collect() {
 		return
 	}
 
+	w.setStage("fetch")
 	collectStart := time.Now()
 	payload, err := w.adapter.Collect()
 	collectDuration := time.Since(collectStart)
@@ -353,6 +371,7 @@ func (w *Worker) collect() {
 	payload["targetType"] = w.profile.TargetType
 
 	// ── Hybrid Mode: write full payload to local DB ──
+	w.setStage("parse")
 	if w.localDB != nil {
 		snapshotID := generateID()
 		// Extract signals from payload if present.
@@ -396,6 +415,7 @@ func (w *Worker) collect() {
 		uploadPayload["localApiToken"] = w.localAPIToken
 	}
 
+	w.setStage("upload")
 	if w.uploadQueue != nil {
 		priority := ClassifySnapshotPriority(uploadPayload)
 		if !w.uploadQueue.Enqueue(w.hostToken, uploadPayload, priority) {
@@ -407,6 +427,8 @@ func (w *Worker) collect() {
 				append(w.targetFields(), Err(err))...)
 		}
 	}
+
+	w.setStage("complete")
 }
 
 // handleError records an error and applies backoff/degradation policy.
@@ -492,6 +514,18 @@ func (w *Worker) sendHeartbeat() {
 	if lastErr != "" {
 		payload["lastError"] = lastErr
 	}
+
+	// Include stage tracking fields
+	w.mu.RLock()
+	currentStage := w.state.CurrentStage
+	restartCount := w.state.RestartCount
+	progressAge := time.Since(w.state.LastProgressAt)
+	w.mu.RUnlock()
+
+	payload["currentStage"] = currentStage
+	payload["restartCount"] = restartCount
+	payload["progressAgeSecs"] = int(progressAge.Seconds())
+
 	if w.localAPIURL != "" {
 		payload["localApiUrl"] = w.localAPIURL
 		payload["localApiToken"] = w.localAPIToken
@@ -504,6 +538,14 @@ func (w *Worker) sendHeartbeat() {
 		audit.Debug("heartbeat.sent", "Heartbeat delivered",
 			append(w.targetFields(), F("workerStatus", workerStatus))...)
 	}
+}
+
+// setStage updates CurrentStage and LastProgressAt atomically.
+func (w *Worker) setStage(stage string) {
+	w.mu.Lock()
+	w.state.CurrentStage = stage
+	w.state.LastProgressAt = time.Now()
+	w.mu.Unlock()
 }
 
 func (w *Worker) setStatus(status WorkerStatus) {

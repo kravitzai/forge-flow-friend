@@ -155,6 +155,7 @@ const (
 	WorkerStatusDegraded WorkerStatus = "degraded"
 	WorkerStatusPaused   WorkerStatus = "paused"
 	WorkerStatusFailed   WorkerStatus = "failed"
+	WorkerStatusStuck    WorkerStatus = "stuck"
 )
 
 // WorkerState holds runtime information about a worker.
@@ -167,6 +168,30 @@ type WorkerState struct {
 	ConsecutiveErrors int          `json:"consecutive_errors"`
 	TotalCollections  int64        `json:"total_collections"`
 	StartedAt         time.Time    `json:"started_at"`
+
+	// Stage tracking — set at key points in collect()
+	// Values: "idle" "scheduled" "connect"
+	//         "fetch" "parse" "upload" "complete" "sleep"
+	CurrentStage string `json:"current_stage,omitempty"`
+
+	// LastProgressAt is updated at every stage transition.
+	// The supervisor watchdog uses this to detect frozen workers.
+	LastProgressAt time.Time `json:"last_progress_at"`
+
+	// NextScheduledAt is set when the worker enters sleep.
+	// The watchdog skips workers whose NextScheduledAt is
+	// still in the future — they are intentionally idle.
+	NextScheduledAt time.Time `json:"next_scheduled_at"`
+
+	// RestartCount tracks how many watchdog-triggered restarts
+	// have occurred. Used for escalation thresholds.
+	RestartCount int `json:"restart_count"`
+
+	// LastRestartAt is when the most recent watchdog restart fired.
+	LastRestartAt time.Time `json:"last_restart_at,omitempty"`
+
+	// CycleStartedAt is the time the current collect cycle began.
+	CycleStartedAt time.Time `json:"cycle_started_at,omitempty"`
 }
 
 // RetryPolicy defines backoff behavior for workers.
