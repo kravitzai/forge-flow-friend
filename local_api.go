@@ -591,8 +591,11 @@ func parseAllowedCIDRs(raw string) []*net.IPNet {
 	return nets
 }
 
-// detectLANURL finds the first non-loopback IPv4 address
-// and builds the URL using the port from bind.
+// detectLANURL finds the first non-loopback, non-virtual IPv4 address
+// and builds the URL using the port from bind. Virtual interfaces
+// (docker0, br-*, veth*, virbr*, vmnet*, vboxnet*) are skipped in
+// a first pass to prefer physical interfaces. A second pass includes
+// all non-loopback interfaces as a fallback.
 func detectLANURL(bind string) string {
 	_, port, err := net.SplitHostPort(bind)
 	if err != nil {
@@ -604,14 +607,22 @@ func detectLANURL(bind string) string {
 		return fmt.Sprintf("http://127.0.0.1:%s", port)
 	}
 
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 ||
-			iface.Flags&net.FlagLoopback != 0 {
-			continue
+	isVirtual := func(name string) bool {
+		for _, prefix := range []string{
+			"docker", "br-", "veth", "virbr",
+			"vmnet", "vboxnet", "lo",
+		} {
+			if strings.HasPrefix(name, prefix) {
+				return true
+			}
 		}
+		return false
+	}
+
+	findIPv4 := func(iface net.Interface) string {
 		addrs, err := iface.Addrs()
 		if err != nil {
-			continue
+			return ""
 		}
 		for _, addr := range addrs {
 			var ip net.IP
@@ -621,12 +632,33 @@ func detectLANURL(bind string) string {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			if ip == nil || ip.IsLoopback() {
-				continue
+			if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
+				return ip.String()
 			}
-			if ip.To4() != nil {
-				return fmt.Sprintf("http://%s:%s", ip.String(), port)
-			}
+		}
+		return ""
+	}
+
+	// Pass 1: prefer physical interfaces (skip virtual)
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 ||
+			iface.Flags&net.FlagLoopback != 0 ||
+			isVirtual(iface.Name) {
+			continue
+		}
+		if ip := findIPv4(iface); ip != "" {
+			return fmt.Sprintf("http://%s:%s", ip, port)
+		}
+	}
+
+	// Pass 2: fallback to any non-loopback IPv4
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 ||
+			iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		if ip := findIPv4(iface); ip != "" {
+			return fmt.Sprintf("http://%s:%s", ip, port)
 		}
 	}
 
