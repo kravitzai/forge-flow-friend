@@ -749,7 +749,18 @@ func desiredToInternal(d DesiredTargetProfile) TargetProfile {
 		TargetType:             d.TargetType,
 		Mode:                   string(d.Mode),
 		Enabled:                d.Enabled,
-		Status:                 d.Status,
+		// Only carry over status values that are
+		// meaningful for agent lifecycle decisions.
+		// "paused" echoed from the cloud is only
+		// valid when target.Paused is also true —
+		// otherwise the agent treats it as pending
+		// so Reconcile() will start the worker.
+		Status: func() TargetStatus {
+			if d.Status == TargetStatusPaused && !d.Paused {
+				return TargetStatusPending
+			}
+			return d.Status
+		}(),
 		Endpoint:               d.Endpoint,
 		TLS:                    d.TLS,
 		Labels:                 d.Labels,

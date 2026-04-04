@@ -189,8 +189,12 @@ func (s *Supervisor) Reconcile() error {
 			continue
 		}
 
-		// Case 2: Target paused — pause worker if running
-		if target.Paused || target.Status == TargetStatusPaused {
+		// Case 2: Target explicitly paused by user.
+		// Only target.Paused (the boolean flag) is
+		// authoritative — Status="paused" from cloud
+		// echo or from a previous stopped worker must
+		// not prevent startup.
+		if target.Paused {
 			if hasWorker {
 				ws := existing.State()
 				if ws.Status == WorkerStatusRunning {
@@ -337,8 +341,15 @@ func (s *Supervisor) onWorkerStateChange(targetID string, status WorkerStatus) {
 					// Clear retry tracking on recovery
 					delete(s.failedRetryAt, targetID)
 					delete(s.failedRetries, targetID)
-				case WorkerStatusStopped:
-					s.state.Targets[i].Status = TargetStatusPaused
+			case WorkerStatusStopped:
+				// Graceful system stop — preserve active
+				// status so next Reconcile() restarts the
+				// worker. TargetStatusPaused is reserved for
+				// explicit user-initiated pauses only
+				// (target.Paused == true).
+				if s.state.Targets[i].Status != TargetStatusPaused {
+					s.state.Targets[i].Status = TargetStatusActive
+				}
 				case WorkerStatusFailed:
 					s.state.Targets[i].Status = TargetStatusError
 				}
