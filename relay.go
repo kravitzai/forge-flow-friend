@@ -106,6 +106,8 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 			"powerstore":      true,
 			"powerflex":       true,
 			"generic-http":    true,
+			"mikrotik":        true,
+			"mikrotik-swos":   true,
 		},
 
 	}
