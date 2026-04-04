@@ -27,7 +27,7 @@ type Supervisor struct {
 	localDB       *LocalDB               // hybrid mode local DB (nil = disabled)
 	localAPIURL   string                 // LAN URL for local API server
 	localAPIToken string                 // pre-shared token for local API
-	localProbeURL string                 // HTTP-only probe URL (port 7071)
+	
 	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
 	failedRetries map[string]int         // targetID -> consecutive retry count
 	// lastDegradedLog rate-limits the agent.degraded
@@ -94,23 +94,6 @@ func (s *Supervisor) GetLocalAPIToken() string {
 	return s.localAPIToken
 }
 
-// SetLocalProbeURL registers the HTTP-only probe URL.
-func (s *Supervisor) SetLocalProbeURL(url string) {
-	s.mu.Lock()
-	s.localProbeURL = url
-	s.mu.Unlock()
-	if url != "" {
-		audit.Info("local_api.start",
-			"Probe URL registered", F("url", url))
-	}
-}
-
-// GetLocalProbeURL returns the HTTP probe URL.
-func (s *Supervisor) GetLocalProbeURL() string {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.localProbeURL
-}
 
 // Initialize loads or creates host state, handles legacy migration.
 func (s *Supervisor) Initialize(legacyCfg *Config) error {
@@ -324,7 +307,6 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 		LocalDB:     s.localDB,
 		LocalAPIURL:   s.localAPIURL,
 		LocalAPIToken: s.localAPIToken,
-		LocalProbeURL: s.localProbeURL,
 		OnStateChange: func(targetID string, status WorkerStatus) {
 			s.onWorkerStateChange(targetID, status)
 		},
