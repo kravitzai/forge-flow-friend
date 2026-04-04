@@ -536,6 +536,28 @@ func (s *Supervisor) Status() []WorkerState {
 	return states
 }
 
+// AgentHealthSummary returns a quick overview of aggregate worker health for diagnostics.
+func (s *Supervisor) AgentHealthSummary() map[string]interface{} {
+	s.mu.RLock()
+	total := len(s.workers)
+	s.mu.RUnlock()
+
+	counts := map[string]int{}
+	var totalRestarts int
+	for _, w := range s.workers {
+		ws := w.State()
+		counts[string(ws.Status)]++
+		totalRestarts += ws.RestartCount
+	}
+
+	return map[string]interface{}{
+		"total_workers":  total,
+		"by_status":      counts,
+		"total_restarts": totalRestarts,
+		"scanned_at":     time.Now().UTC(),
+	}
+}
+
 // Shutdown gracefully stops all workers.
 func (s *Supervisor) Shutdown() {
 	s.mu.Lock()
@@ -653,6 +675,27 @@ func (s *Supervisor) watchdogScan() {
 				F("restart_count", ws.RestartCount),
 			)...)
 
+		// Escalation: if this worker has restarted repeatedly in a short
+		// window, stop trying and mark it failed instead.
+		const (
+			maxRestartsInWindow = 3
+			restartWindow       = 30 * time.Minute
+		)
+		if ws.RestartCount >= maxRestartsInWindow &&
+			!ws.LastRestartAt.IsZero() &&
+			now.Sub(ws.LastRestartAt) < restartWindow {
+			audit.Error("worker.watchdog_escalated",
+				"Worker restart limit reached — marking failed",
+				append(
+					Target(ws.TargetID, "", ""),
+					F("restart_count", ws.RestartCount),
+					F("window_mins", 30),
+				)...)
+			w.setStatus(WorkerStatusFailed)
+			w.sendHeartbeat()
+			continue // skip restart
+		}
+
 		w.setStatus(WorkerStatusStuck)
 		w.sendHeartbeat()
 
@@ -667,6 +710,33 @@ func (s *Supervisor) watchdogScan() {
 					Target(tid, "", "")...)
 			}
 		}(w, targetID)
+	}
+
+	// Agent-level health check: surface degraded state when
+	// too many workers are simultaneously unhealthy.
+	s.mu.RLock()
+	total := len(s.workers)
+	s.mu.RUnlock()
+	if total == 0 {
+		return
+	}
+	unhealthy := 0
+	for _, w := range workers {
+		ws := w.State()
+		if ws.Status == WorkerStatusDegraded ||
+			ws.Status == WorkerStatusStuck ||
+			ws.Status == WorkerStatusFailed {
+			unhealthy++
+		}
+	}
+	pct := float64(unhealthy) / float64(total)
+	if pct >= 0.40 {
+		audit.Warn("agent.degraded",
+			"Agent health degraded — majority of workers unhealthy",
+			F("unhealthy_workers", unhealthy),
+			F("total_workers", total),
+			F("pct", int(pct*100)),
+		)
 	}
 }
 
