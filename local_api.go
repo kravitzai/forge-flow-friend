@@ -29,6 +29,7 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -88,14 +89,23 @@ func NewLocalAPIServer(
 		allowedNets: allowedNets,
 		certFile:    certFile,
 		keyFile:     keyFile,
-		lanURL: func() string {
-			if v := os.Getenv("FORGEAI_LOCAL_API_URL"); v != "" {
-				// Normalise to https since TLS is always attempted
-				v = strings.Replace(v, "http://", "https://", 1)
-				return v
+	lanURL: func() string {
+		if v := os.Getenv("FORGEAI_LOCAL_API_URL"); v != "" {
+			// Normalise to https since TLS is always attempted
+			v = strings.Replace(v, "http://", "https://", 1)
+			// Ensure the port is present — if the user provided just an IP,
+			// append the port from the bind address so the frontend probes
+			// the correct port instead of defaulting to 443.
+			if u, err := url.Parse(v); err == nil && u.Port() == "" {
+				_, bindPort, _ := net.SplitHostPort(bind)
+				if bindPort != "" {
+					v = strings.TrimRight(v, "/") + ":" + bindPort
+				}
 			}
-			return detectLANURL(bind)
-		}(),
+			return v
+		}
+		return detectLANURL(bind)
+	}(),
 	}
 
 	mux := http.NewServeMux()
@@ -313,7 +323,6 @@ func (s *LocalAPIServer) Stop() {
 func (s *LocalAPIServer) LANURL() string {
 	return s.lanURL
 }
-
 
 // authMiddleware enforces X-Local-Token header.
 func (s *LocalAPIServer) authMiddleware(
@@ -591,11 +600,8 @@ func parseAllowedCIDRs(raw string) []*net.IPNet {
 	return nets
 }
 
-// detectLANURL finds the first non-loopback, non-virtual IPv4 address
-// and builds the URL using the port from bind. Virtual interfaces
-// (docker0, br-*, veth*, virbr*, vmnet*, vboxnet*) are skipped in
-// a first pass to prefer physical interfaces. A second pass includes
-// all non-loopback interfaces as a fallback.
+// detectLANURL finds the first non-loopback IPv4 address
+// and builds the URL using the port from bind.
 func detectLANURL(bind string) string {
 	_, port, err := net.SplitHostPort(bind)
 	if err != nil {
@@ -607,22 +613,14 @@ func detectLANURL(bind string) string {
 		return fmt.Sprintf("http://127.0.0.1:%s", port)
 	}
 
-	isVirtual := func(name string) bool {
-		for _, prefix := range []string{
-			"docker", "br-", "veth", "virbr",
-			"vmnet", "vboxnet", "lo",
-		} {
-			if strings.HasPrefix(name, prefix) {
-				return true
-			}
+	for _, iface := range ifaces {
+		if iface.Flags&net.FlagUp == 0 ||
+			iface.Flags&net.FlagLoopback != 0 {
+			continue
 		}
-		return false
-	}
-
-	findIPv4 := func(iface net.Interface) string {
 		addrs, err := iface.Addrs()
 		if err != nil {
-			return ""
+			continue
 		}
 		for _, addr := range addrs {
 			var ip net.IP
@@ -632,33 +630,12 @@ func detectLANURL(bind string) string {
 			case *net.IPAddr:
 				ip = v.IP
 			}
-			if ip != nil && !ip.IsLoopback() && ip.To4() != nil {
-				return ip.String()
+			if ip == nil || ip.IsLoopback() {
+				continue
 			}
-		}
-		return ""
-	}
-
-	// Pass 1: prefer physical interfaces (skip virtual)
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 ||
-			iface.Flags&net.FlagLoopback != 0 ||
-			isVirtual(iface.Name) {
-			continue
-		}
-		if ip := findIPv4(iface); ip != "" {
-			return fmt.Sprintf("http://%s:%s", ip, port)
-		}
-	}
-
-	// Pass 2: fallback to any non-loopback IPv4
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 ||
-			iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		if ip := findIPv4(iface); ip != "" {
-			return fmt.Sprintf("http://%s:%s", ip, port)
+			if ip.To4() != nil {
+				return fmt.Sprintf("http://%s:%s", ip.String(), port)
+			}
 		}
 	}
 

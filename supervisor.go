@@ -27,7 +27,6 @@ type Supervisor struct {
 	localDB       *LocalDB               // hybrid mode local DB (nil = disabled)
 	localAPIURL   string                 // LAN URL for local API server
 	localAPIToken string                 // pre-shared token for local API
-	
 	failedRetryAt map[string]time.Time   // targetID -> next allowed retry time
 	failedRetries map[string]int         // targetID -> consecutive retry count
 	// lastDegradedLog rate-limits the agent.degraded
@@ -93,7 +92,6 @@ func (s *Supervisor) GetLocalAPIToken() string {
 	defer s.mu.RUnlock()
 	return s.localAPIToken
 }
-
 
 // Initialize loads or creates host state, handles legacy migration.
 func (s *Supervisor) Initialize(legacyCfg *Config) error {
