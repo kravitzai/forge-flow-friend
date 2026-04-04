@@ -237,13 +237,17 @@ func main() {
 	// Wire reconnect callback: replay unsynced snapshots and trigger
 	// immediate desired-state refresh on backend recovery.
 	uploadQueue.SetOnReconnect(func() {
+		// Replay snapshots that were deferred
+		// during the outage (written to local DB).
 		uploadQueue.ReplayUnsynced()
-		// Force all workers to send a heartbeat so backend gets
-		// current worker status immediately after reconnect
-		for _, ws := range supervisor.Status() {
-			audit.Info("upload.reconnect", "Re-sending heartbeat after reconnect",
-				F("target_id", ws.TargetID))
-		}
+
+		// Broadcast current worker status to
+		// backend so last_worker_status clears
+		// the stale "failed" state from before
+		// the outage.
+		audit.Info("upload.reconnect",
+			"Backend connectivity restored — broadcasting worker status")
+		supervisor.BroadcastHeartbeat()
 	})
 
 	// ── Metrics Logger ──

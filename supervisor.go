@@ -540,6 +540,25 @@ func (s *Supervisor) Status() []WorkerState {
 	return states
 }
 
+// BroadcastHeartbeat triggers an immediate
+// heartbeat from every running worker so the
+// backend gets current status after reconnect.
+// Safe to call from any goroutine.
+func (s *Supervisor) BroadcastHeartbeat() {
+	s.mu.RLock()
+	workers := make([]*Worker, 0, len(s.workers))
+	for _, w := range s.workers {
+		workers = append(workers, w)
+	}
+	s.mu.RUnlock()
+
+	for _, w := range workers {
+		// Run in goroutine so a slow heartbeat
+		// on one target does not block others.
+		go w.sendHeartbeat()
+	}
+}
+
 // AgentHealthSummary returns a quick overview of aggregate worker health for diagnostics.
 func (s *Supervisor) AgentHealthSummary() map[string]interface{} {
 	s.mu.RLock()
@@ -648,11 +667,18 @@ func (s *Supervisor) RunLocalReconcile(ctx context.Context) {
 				continue
 			}
 
-			audit.Info("sync.reconciled",
-				"Local reconcile — retrying failed workers (cloud sync may be unavailable)")
-			if err := s.Reconcile(); err != nil {
-				audit.Warn("sync.error", "Local reconcile failed", Err(err))
-			}
+		audit.Info("sync.reconciled",
+			"Local reconcile — retrying failed workers (cloud sync may be unavailable)")
+		if err := s.Reconcile(); err != nil {
+			audit.Warn("sync.error", "Local reconcile failed", Err(err))
+		} else {
+			// After reconcile, broadcast current
+			// worker status. If cloud is available
+			// this updates the DB immediately.
+			// If not, the reconnect callback will
+			// fire the broadcast when it recovers.
+			s.BroadcastHeartbeat()
+		}
 		}
 	}
 }
