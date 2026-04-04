@@ -110,7 +110,8 @@ type SyncManager struct {
 	interval     time.Duration
 	fastInterval time.Duration
 	cancel       context.CancelFunc
-	done         chan struct{}
+	done             chan struct{}
+	triggerCh        chan struct{}
 	fastPollUntil    time.Time
 	lastRejected     []RejectedProfile
 	lastStatusPushAt time.Time
@@ -137,6 +138,7 @@ func NewSyncManager(backend *BackendClient, store *Store, supervisor *Supervisor
 		fastInterval:       5 * time.Second,
 		statusPushInterval: 2 * time.Minute,
 		done:               make(chan struct{}),
+		triggerCh:           make(chan struct{}, 1),
 	}
 }
 
@@ -158,6 +160,17 @@ func (sm *SyncManager) Stop() {
 	if sm.cancel != nil {
 		sm.cancel()
 		<-sm.done
+	}
+}
+
+// TriggerSync wakes the sync loop immediately
+// for an out-of-band desired-state fetch.
+// Non-blocking: if a trigger is already pending,
+// this is a no-op.
+func (sm *SyncManager) TriggerSync() {
+	select {
+	case sm.triggerCh <- struct{}{}:
+	default:
 	}
 }
 
@@ -222,6 +235,8 @@ func (sm *SyncManager) run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-sm.triggerCh:
+			sm.fetchAndReconcile()
 		case <-time.After(pollInterval):
 			sm.fetchAndReconcile()
 		}

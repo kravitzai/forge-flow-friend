@@ -234,8 +234,10 @@ func main() {
 	uploadQueue.Start()
 	supervisor.SetUploadQueue(uploadQueue)
 
-	// Wire reconnect callback: replay unsynced snapshots and trigger
-	// immediate desired-state refresh on backend recovery.
+	// Wire reconnect callback: replay unsynced snapshots, broadcast
+	// heartbeats, and trigger immediate desired-state refresh on
+	// backend recovery.
+	var syncMgrPtr *SyncManager
 	uploadQueue.SetOnReconnect(func() {
 		// Replay snapshots that were deferred
 		// during the outage (written to local DB).
@@ -246,8 +248,16 @@ func main() {
 		// the stale "failed" state from before
 		// the outage.
 		audit.Info("upload.reconnect",
-			"Backend connectivity restored — broadcasting worker status")
+			"Backend connectivity restored — broadcasting "+
+				"worker status and triggering desired-state refresh")
 		supervisor.BroadcastHeartbeat()
+
+		// Trigger an immediate desired-state sync so the
+		// agent picks up any control-plane changes that
+		// arrived during the outage.
+		if syncMgrPtr != nil {
+			syncMgrPtr.TriggerSync()
+		}
 	})
 
 	// ── Metrics Logger ──
@@ -352,6 +362,7 @@ func main() {
 		syncManager = NewSyncManager(backend, store, supervisor, changePolicyConfig)
 		syncManager.Start(syncInterval)
 		audit.Info("sync.reconciled", "Desired-state sync enabled", F("interval", syncInterval.String()))
+		syncMgrPtr = syncManager
 	} else {
 		audit.Warn("sync.error", "No connector token — desired-state sync disabled")
 		audit.Info("host.config_loaded", "Enroll the host to enable remote management")

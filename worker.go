@@ -39,6 +39,12 @@ type Worker struct {
 	localAPIURL   string
 	localAPIToken string
 
+	// lastHeartbeatWarn is the time of the last
+	// heartbeat.failed log. Used to suppress
+	// repeated failure logs during known cloud
+	// outages — one log per 5 minutes is enough.
+	lastHeartbeatWarn time.Time
+
 	// Callbacks
 	onStateChange func(targetID string, status WorkerStatus)
 }
@@ -532,8 +538,24 @@ func (w *Worker) sendHeartbeat() {
 	}
 
 	if err := w.backend.Post(w.hostToken, payload); err != nil {
-		audit.Warn("heartbeat.failed", "Heartbeat failed",
-			append(w.targetFields(), Err(err))...)
+		// Suppress repeated failure logs during a
+		// known cloud outage. The upload queue's probe
+		// loop will detect recovery and broadcast
+		// heartbeats. One log per 5 minutes is enough.
+		isKnownOutage := w.uploadQueue != nil &&
+			!w.uploadQueue.IsBackendOnline()
+		w.mu.Lock()
+		shouldLog := !isKnownOutage ||
+			time.Since(w.lastHeartbeatWarn) > 5*time.Minute
+		if shouldLog {
+			w.lastHeartbeatWarn = time.Now()
+		}
+		w.mu.Unlock()
+		if shouldLog {
+			audit.Warn("heartbeat.failed",
+				"Heartbeat failed",
+				append(w.targetFields(), Err(err))...)
+		}
 	} else {
 		audit.Debug("heartbeat.sent", "Heartbeat delivered",
 			append(w.targetFields(), F("workerStatus", workerStatus))...)

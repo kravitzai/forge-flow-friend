@@ -367,6 +367,16 @@ func (q *UploadQueue) markOnline() {
 	}
 }
 
+// IsBackendOnline returns whether the upload
+// queue believes the backend is reachable.
+// Workers use this to suppress repeated
+// heartbeat failure logs during known outages.
+func (q *UploadQueue) IsBackendOnline() bool {
+	q.backendOnlineMu.Lock()
+	defer q.backendOnlineMu.Unlock()
+	return q.backendOnline
+}
+
 // markOffline records that backend is unreachable.
 func (q *UploadQueue) markOffline() {
 	q.backendOnlineMu.Lock()
