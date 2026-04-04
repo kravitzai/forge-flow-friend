@@ -311,6 +311,7 @@ func main() {
 		// them in heartbeat payloads
 		supervisor.SetLocalAPIURL(localAPI.LANURL())
 		supervisor.SetLocalAPIToken(localAPIToken)
+		supervisor.SetLocalProbeURL(localAPI.ProbeURL())
 
 		stats := ldb.Stats()
 		audit.Info("local_db.stats", "Local DB ready",
@@ -322,9 +323,11 @@ func main() {
 		go func() {
 			time.Sleep(500 * time.Millisecond)
 			supervisor.SetLocalAPIURL(localAPI.LANURL())
+			supervisor.SetLocalProbeURL(localAPI.ProbeURL())
 			audit.Info("local_api.start",
 				"LAN URL finalised",
-				F("url", localAPI.LANURL()))
+				F("url", localAPI.LANURL()),
+				F("probe_url", localAPI.ProbeURL()))
 		}()
 	}
 

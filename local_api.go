@@ -49,6 +49,7 @@ type LocalAPIServer struct {
 	token       string
 	bind        string
 	server      *http.Server
+	probeServer *http.Server  // HTTP-only probe on port 7071
 	lanURL      string // e.g. "https://192.168.1.50:7070"
 	allowedNets []*net.IPNet // nil = localhost only
 	certFile    string
@@ -119,6 +120,28 @@ func NewLocalAPIServer(
 		IdleTimeout:  60 * time.Second,
 	}
 
+	// Probe server: HTTP-only, health endpoint only.
+	// Allows browsers to test reachability without
+	// the self-signed TLS cert blocking the probe.
+	// Uses the same IP allowlist as the main server.
+	probeAddr := func() string {
+		host, _, err := net.SplitHostPort(bind)
+		if err != nil {
+			host = "0.0.0.0"
+		}
+		return net.JoinHostPort(host, "7071")
+	}()
+	probeMux := http.NewServeMux()
+	probeMux.HandleFunc("/v1/health",
+		s.preflightMiddleware(
+			s.ipAllowedMiddleware(s.handleHealth)))
+	s.probeServer = &http.Server{
+		Addr:         probeAddr,
+		Handler:      probeMux,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	}
+
 	return s
 }
 
@@ -174,6 +197,26 @@ func (s *LocalAPIServer) Start() {
 			err != http.ErrServerClosed {
 			audit.Error("local_api.start",
 				"Local API server error", Err(err))
+		}
+	}()
+
+	// Start HTTP-only probe server
+	s.startProbeServer()
+}
+
+// startProbeServer launches the HTTP-only probe listener.
+func (s *LocalAPIServer) startProbeServer() {
+	if s.probeServer == nil {
+		return
+	}
+	go func() {
+		audit.Info("local_api.start",
+			"HTTP probe server listening",
+			F("addr", s.probeServer.Addr))
+		if err := s.probeServer.ListenAndServe(); err != nil &&
+			err != http.ErrServerClosed {
+			audit.Warn("local_api.start",
+				"HTTP probe server error", Err(err))
 		}
 	}()
 }
@@ -301,6 +344,9 @@ func (s *LocalAPIServer) Stop() {
 	ctx, cancel := context.WithTimeout(
 		context.Background(), 5*time.Second)
 	defer cancel()
+	if s.probeServer != nil {
+		s.probeServer.Shutdown(ctx)
+	}
 	if err := s.server.Shutdown(ctx); err != nil {
 		audit.Warn("local_api.stop",
 			"Local API shutdown error", Err(err))
@@ -312,6 +358,21 @@ func (s *LocalAPIServer) Stop() {
 // LANURL returns the advertised LAN address for this server.
 func (s *LocalAPIServer) LANURL() string {
 	return s.lanURL
+}
+
+// ProbeURL returns the HTTP-only probe URL (port 7071).
+// Browsers use this to test LAN reachability without TLS.
+func (s *LocalAPIServer) ProbeURL() string {
+	u := s.lanURL
+	// Replace https with http
+	u = strings.Replace(u, "https://", "http://", 1)
+	// Replace port with 7071
+	host, _, err := net.SplitHostPort(
+		strings.TrimPrefix(u, "http://"))
+	if err != nil {
+		return ""
+	}
+	return "http://" + net.JoinHostPort(host, "7071")
 }
 
 // authMiddleware enforces X-Local-Token header.

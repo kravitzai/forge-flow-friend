@@ -38,6 +38,7 @@ type Worker struct {
 	// LAN URL for local API (empty = not advertised)
 	localAPIURL   string
 	localAPIToken string
+	localProbeURL string
 
 	// lastHeartbeatWarn is the time of the last
 	// heartbeat.failed log. Used to suppress
@@ -61,6 +62,7 @@ type WorkerConfig struct {
 	LocalDB       *LocalDB
 	LocalAPIURL   string
 	LocalAPIToken string
+	LocalProbeURL string
 	OnStateChange func(targetID string, status WorkerStatus)
 }
 
@@ -81,6 +83,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		localDB:       cfg.LocalDB,
 		localAPIURL:   cfg.LocalAPIURL,
 		localAPIToken: cfg.LocalAPIToken,
+		localProbeURL: cfg.LocalProbeURL,
 		onStateChange: cfg.OnStateChange,
 		state: WorkerState{
 			TargetID: cfg.Profile.TargetID,
@@ -419,6 +422,9 @@ func (w *Worker) collect() {
 	if w.localAPIURL != "" {
 		uploadPayload["localApiUrl"] = w.localAPIURL
 		uploadPayload["localApiToken"] = w.localAPIToken
+		if w.localProbeURL != "" {
+			uploadPayload["localProbeUrl"] = w.localProbeURL
+		}
 	}
 
 	w.setStage("upload")
@@ -535,6 +541,9 @@ func (w *Worker) sendHeartbeat() {
 	if w.localAPIURL != "" {
 		payload["localApiUrl"] = w.localAPIURL
 		payload["localApiToken"] = w.localAPIToken
+		if w.localProbeURL != "" {
+			payload["localProbeUrl"] = w.localProbeURL
+		}
 	}
 
 	if err := w.backend.Post(w.hostToken, payload); err != nil {
