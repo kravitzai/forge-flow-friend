@@ -26,6 +26,7 @@ type Worker struct {
 	cancel   context.CancelFunc
 	ctx      context.Context
 	done     chan struct{}
+	stopped  bool // guarded by mu — prevents double-close of done
 	backend  *BackendClient
 	hostToken string
 
@@ -110,10 +111,19 @@ func (w *Worker) Start() error {
 	return nil
 }
 
-// Stop gracefully stops the worker.
+// Stop gracefully stops the worker. Idempotent — safe to call multiple times.
 func (w *Worker) Stop() {
 	w.cancel()
-	<-w.done
+
+	// Wait for run() to finish, but only if it hasn't already closed done.
+	w.mu.RLock()
+	alreadyStopped := w.stopped
+	w.mu.RUnlock()
+
+	if !alreadyStopped {
+		<-w.done
+	}
+
 	if w.adapter != nil {
 		w.adapter.Close()
 	}
@@ -137,9 +147,12 @@ func (w *Worker) Restart() error {
 
 	w.Stop()
 
-	// Reset context
+	// Reset context and done channel under lock
+	w.mu.Lock()
 	w.ctx, w.cancel = context.WithCancel(context.Background())
 	w.done = make(chan struct{})
+	w.stopped = false
+	w.mu.Unlock()
 
 	return w.Start()
 }
@@ -157,8 +170,12 @@ func (w *Worker) State() WorkerState {
 
 // run is the main collection loop.
 func (w *Worker) run() {
-	defer close(w.done)
-
+	defer func() {
+		w.mu.Lock()
+		w.stopped = true
+		w.mu.Unlock()
+		close(w.done)
+	}()
 	// Initialize adapter
 	if err := w.adapter.Init(w.profile, w.creds); err != nil {
 		w.mu.Lock()
@@ -255,9 +272,12 @@ func (w *Worker) run() {
 				w.handleError(fmt.Errorf(
 					"collection watchdog timeout after %v", watchdog))
 				w.sendHeartbeat()
-				// Restart the worker to get a fresh
-				// HTTP client and clean state
-				go w.Restart()
+				// Signal restart request — supervisor will handle it.
+				// We must NOT call w.Restart() from inside run() because
+				// Restart() calls Stop() which blocks on <-w.done, but
+				// run() owns done and hasn't returned yet → deadlock or
+				// double-close panic.
+				w.setStatus(WorkerStatusStuck)
 				return
 			case <-w.ctx.Done():
 				return
