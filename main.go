@@ -297,14 +297,18 @@ func main() {
 	// ── Local API Server (Hybrid Mode) ──
 	// Must be set up BEFORE Reconcile() so workers get the LAN URL/token
 	// at creation time and include them in heartbeats.
+	// Create a RelayHandler for direct LAN execution via /v1/execute.
 	var localAPI *LocalAPIServer
+	var localRelayHandler *RelayHandler
 	if ldb := store.LocalDB(); ldb != nil {
+		localRelayHandler = NewRelayHandler(supervisor, backend, store, changePolicyConfig)
+
 		bind := os.Getenv("FORGEAI_LOCAL_API_BIND")
 		if bind == "" {
 			bind = defaultLocalAPIBind
 		}
 		localAPI = NewLocalAPIServer(
-			ldb, supervisor, localAPIToken, bind, configDir)
+			ldb, supervisor, localAPIToken, bind, configDir, localRelayHandler)
 		localAPI.Start()
 
 		// Register LAN URL and token on supervisor so workers include

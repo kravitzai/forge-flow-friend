@@ -10,9 +10,10 @@
 // the server falls back to plain HTTP with a warning.
 //
 // Endpoints:
-//   GET /v1/health              — unauthenticated reachability probe
-//   GET /v1/targets             — list all targets with status
-//   GET /v1/targets/:id/snapshot — latest decrypted snapshot for a target
+//   GET  /v1/health              — unauthenticated reachability probe
+//   GET  /v1/targets             — list all targets with status
+//   GET  /v1/targets/:id/snapshot — latest decrypted snapshot for a target
+//   POST /v1/execute             — direct LAN command execution (bypasses cloud relay)
 
 package main
 
@@ -45,27 +46,30 @@ const (
 // Only started when Hybrid Mode is enabled.
 // All endpoints except /v1/health require X-Local-Token.
 type LocalAPIServer struct {
-	db          *LocalDB
-	supervisor  *Supervisor
-	token       string
-	bind        string
-	server      *http.Server
-	lanURL      string // e.g. "https://192.168.1.50:7070"
-	allowedNets []*net.IPNet // nil = localhost only
-	certFile    string
-	keyFile     string
+	db           *LocalDB
+	supervisor   *Supervisor
+	relayHandler *RelayHandler
+	token        string
+	bind         string
+	server       *http.Server
+	lanURL       string // e.g. "https://192.168.1.50:7070"
+	allowedNets  []*net.IPNet // nil = localhost only
+	certFile     string
+	keyFile      string
 }
 
 // NewLocalAPIServer creates and configures the server.
 // token is the pre-shared auth token.
 // bind is the listen address (e.g. "0.0.0.0:7070").
 // certDir is where TLS cert/key files are stored.
+// relayHandler enables direct LAN execution via /v1/execute (may be nil).
 func NewLocalAPIServer(
 	db *LocalDB,
 	supervisor *Supervisor,
 	token string,
 	bind string,
 	certDir string,
+	relayHandler *RelayHandler,
 ) *LocalAPIServer {
 	if bind == "" {
 		bind = defaultLocalAPIBind
@@ -82,13 +86,14 @@ func NewLocalAPIServer(
 	keyFile := filepath.Join(certDir, "local-api.key")
 
 	s := &LocalAPIServer{
-		db:          db,
-		supervisor:  supervisor,
-		token:       token,
-		bind:        bind,
-		allowedNets: allowedNets,
-		certFile:    certFile,
-		keyFile:     keyFile,
+		db:           db,
+		supervisor:   supervisor,
+		relayHandler: relayHandler,
+		token:        token,
+		bind:         bind,
+		allowedNets:  allowedNets,
+		certFile:     certFile,
+		keyFile:      keyFile,
 	lanURL: func() string {
 		if v := os.Getenv("FORGEAI_LOCAL_API_URL"); v != "" {
 			// Normalise to https since TLS is always attempted
@@ -120,6 +125,10 @@ func NewLocalAPIServer(
 		s.preflightMiddleware(
 			s.ipAllowedMiddleware(
 				s.authMiddleware(s.handleTargetRoute))))
+	mux.HandleFunc("/v1/execute",
+		s.preflightMiddleware(
+			s.ipAllowedMiddleware(
+				s.authMiddleware(s.handleExecute))))
 
 	s.server = &http.Server{
 		Addr:         bind,
@@ -520,6 +529,69 @@ func (s *LocalAPIServer) handleSnapshot(
 	s.writeJSON(w, http.StatusOK, resp)
 }
 
+// POST /v1/execute — direct browser-to-agent command execution over LAN.
+// Bypasses the cloud relay loop entirely. Same execution path as the
+// cloud relay but triggered directly by the browser over LAN HTTPS.
+func (s *LocalAPIServer) handleExecute(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	if r.Method != http.MethodPost {
+		s.writeError(w, http.StatusMethodNotAllowed,
+			"method not allowed")
+		return
+	}
+
+	if s.relayHandler == nil {
+		s.writeError(w, http.StatusServiceUnavailable,
+			"execution not available")
+		return
+	}
+
+	var cmd RelayCommand
+	if err := json.NewDecoder(r.Body).Decode(&cmd); err != nil {
+		s.writeError(w, http.StatusBadRequest,
+			"invalid request body")
+		return
+	}
+
+	// Require a request ID for tracing
+	if cmd.ID == "" {
+		cmd.ID = generateID()
+	}
+
+	// Validate required fields
+	if cmd.Platform == "" ||
+		cmd.Method == "" ||
+		cmd.Path == "" ||
+		cmd.TargetProfileID == "" {
+		s.writeError(w, http.StatusBadRequest,
+			"platform, method, path, and target_profile_id are required")
+		return
+	}
+
+	audit.Info("local_api.execute",
+		"Direct LAN execute request",
+		F("cmd_id", cmd.ID),
+		F("platform", cmd.Platform),
+		F("method", cmd.Method),
+		F("path", cmd.Path),
+		F("target_id", cmd.TargetProfileID),
+		F("safety", cmd.SafetyLevel))
+
+	result := s.relayHandler.executeCommand(cmd)
+
+	s.writeJSON(w, http.StatusOK,
+		map[string]interface{}{
+			"ok":              result.ErrorMessage == "",
+			"id":              result.ID,
+			"response_status": result.ResponseStatus,
+			"response_data":   result.ResponseData,
+			"error_message":   result.ErrorMessage,
+			"duration_ms":     result.DurationMs,
+		})
+}
+
 // ── Helpers ──
 
 func (s *LocalAPIServer) writeJSON(
@@ -545,7 +617,7 @@ func (s *LocalAPIServer) corsHeaders(
 		"Access-Control-Allow-Origin", "*")
 	w.Header().Set(
 		"Access-Control-Allow-Methods",
-		"GET, OPTIONS")
+		"GET, POST, OPTIONS")
 	w.Header().Set(
 		"Access-Control-Allow-Headers",
 		"X-Local-Token, Content-Type")
