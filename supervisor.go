@@ -305,6 +305,7 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 		LocalDB:     s.localDB,
 		LocalAPIURL:   s.localAPIURL,
 		LocalAPIToken: s.localAPIToken,
+		LanOnly:     s.state.Config.LanOnly,
 		OnStateChange: func(targetID string, status WorkerStatus) {
 			s.onWorkerStateChange(targetID, status)
 		},

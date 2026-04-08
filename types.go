@@ -39,6 +39,10 @@ type HostConfig struct {
 	SyncIntervalSecs     int    `json:"sync_interval_secs"`     // desired-state polling interval
 	LocalRetentionDays   int    `json:"local_retention_days"`   // hybrid mode: days to keep local snapshots
 
+	// LanOnly suppresses all cloud snapshot uploads. Snapshots are stored
+	// in the local DB only. Set via display_mode = "lan-only" on the control plane.
+	LanOnly bool `json:"lan_only"`
+
 	// Remote action controls (both default to false — admin must opt in)
 	RemoteLiveQueryEnabled bool `json:"remote_live_query_enabled"` // allow Live Query relay commands
 	RemoteRestartEnabled   bool `json:"remote_restart_enabled"`    // allow remote agent restart

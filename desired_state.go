@@ -46,6 +46,8 @@ type HostConfigOverride struct {
 	LogLevel             string `json:"log_level,omitempty"`
 	SyncIntervalSecs     int    `json:"sync_interval_secs,omitempty"`
 	MaxConcurrentWorkers int    `json:"max_concurrent_workers,omitempty"`
+	// DisplayMode from control plane. "lan-only" activates local-only mode.
+	DisplayMode string `json:"display_mode,omitempty"`
 }
 
 type HostPolicy struct {
@@ -658,6 +660,20 @@ func (sm *SyncManager) applyHostConfig(override *HostConfigOverride) {
 	if override.MaxConcurrentWorkers >= 0 {
 		state.Config.MaxConcurrentWorkers = override.MaxConcurrentWorkers
 		changed = true
+	}
+
+	// Apply display_mode → LanOnly flag
+	if override.DisplayMode == "lan-only" || override.DisplayMode == "hybrid" {
+		newLanOnly := override.DisplayMode == "lan-only"
+		if state.Config.LanOnly != newLanOnly {
+			state.Config.LanOnly = newLanOnly
+			changed = true
+			if newLanOnly {
+				audit.Info("security.lan_only", "LAN only mode activated — cloud snapshot uploads suppressed")
+			} else {
+				audit.Info("security.lan_only", "LAN only mode deactivated — cloud uploads resumed")
+			}
+		}
 	}
 
 	if changed {

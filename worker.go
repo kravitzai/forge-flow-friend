@@ -40,6 +40,9 @@ type Worker struct {
 	localAPIURL   string
 	localAPIToken string
 
+	// lanOnly suppresses cloud snapshot uploads (read per-cycle)
+	lanOnly bool
+
 	// lastHeartbeatWarn is the time of the last
 	// heartbeat.failed log. Used to suppress
 	// repeated failure logs during known cloud
@@ -62,6 +65,7 @@ type WorkerConfig struct {
 	LocalDB       *LocalDB
 	LocalAPIURL   string
 	LocalAPIToken string
+	LanOnly       bool // skip cloud uploads when true
 	OnStateChange func(targetID string, status WorkerStatus)
 }
 
@@ -82,6 +86,7 @@ func NewWorker(cfg WorkerConfig) *Worker {
 		localDB:       cfg.LocalDB,
 		localAPIURL:   cfg.LocalAPIURL,
 		localAPIToken: cfg.LocalAPIToken,
+		lanOnly:       cfg.LanOnly,
 		onStateChange: cfg.OnStateChange,
 		state: WorkerState{
 			TargetID: cfg.Profile.TargetID,
@@ -441,16 +446,23 @@ func (w *Worker) collect() {
 		uploadPayload["localApiToken"] = w.localAPIToken
 	}
 
-	w.setStage("upload")
-	if w.uploadQueue != nil {
-		priority := ClassifySnapshotPriority(uploadPayload)
-		if !w.uploadQueue.Enqueue(w.hostToken, uploadPayload, priority) {
-			audit.Error("upload.dropped", "Snapshot dropped by upload queue", w.targetFields()...)
-		}
+	// ── Cloud upload ──
+	// Skipped entirely in LAN only mode — snapshots are local DB only.
+	if w.lanOnly {
+		audit.Debug("upload.skipped", "LAN only mode — snapshot not sent to cloud",
+			w.targetFields()...)
 	} else {
-		if err := w.backend.Post(w.hostToken, uploadPayload); err != nil {
-			audit.Warn("upload.failed", "Snapshot delivery failed",
-				append(w.targetFields(), Err(err))...)
+		w.setStage("upload")
+		if w.uploadQueue != nil {
+			priority := ClassifySnapshotPriority(uploadPayload)
+			if !w.uploadQueue.Enqueue(w.hostToken, uploadPayload, priority) {
+				audit.Error("upload.dropped", "Snapshot dropped by upload queue", w.targetFields()...)
+			}
+		} else {
+			if err := w.backend.Post(w.hostToken, uploadPayload); err != nil {
+				audit.Warn("upload.failed", "Snapshot delivery failed",
+					append(w.targetFields(), Err(err))...)
+			}
 		}
 	}
 
