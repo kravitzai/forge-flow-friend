@@ -553,16 +553,23 @@ func (w *Worker) sendHeartbeat() {
 		payload["lastError"] = lastErr
 	}
 
-	// Include stage tracking fields
+	// Include stage tracking fields and last collection timestamp
 	w.mu.RLock()
 	currentStage := w.state.CurrentStage
 	restartCount := w.state.RestartCount
 	progressAge := time.Since(w.state.LastProgressAt)
+	lastCollAt := w.state.LastCollectionAt
 	w.mu.RUnlock()
 
 	payload["currentStage"] = currentStage
 	payload["restartCount"] = restartCount
 	payload["progressAgeSecs"] = int(progressAge.Seconds())
+
+	// Include last collection timestamp so cloud tracks freshness
+	// even when cloud uploads are suppressed (LAN-only mode)
+	if !lastCollAt.IsZero() {
+		payload["lastCollectedAt"] = lastCollAt.UTC().Format(time.RFC3339)
+	}
 
 	if w.localAPIURL != "" {
 		payload["localApiUrl"] = w.localAPIURL
