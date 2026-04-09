@@ -292,3 +292,102 @@ func TestSupervisorMultipleTargetsNoDeadlock(t *testing.T) {
 
 	sup.Shutdown()
 }
+
+// TestWorkerProfileStableAfterTargetRemoval is the core regression test for
+// the slice-pointer aliasing bug. It verifies that after removing targets,
+// surviving workers still reference the correct TargetID and TargetType —
+// not a shifted slice element.
+func TestWorkerProfileStableAfterTargetRemoval(t *testing.T) {
+	store, _ := NewStore("/tmp/forgeai-test-alias-"+fmt.Sprintf("%d", time.Now().UnixNano()), false)
+	backend := &BackendClient{BaseURL: "http://localhost:0"}
+	sup := NewSupervisor(store, backend)
+
+	sup.RegisterAdapter("typeA", func(p *TargetProfile) (TargetAdapter, error) {
+		return &fakeAdapter{initDelay: 10 * time.Millisecond}, nil
+	})
+	sup.RegisterAdapter("typeB", func(p *TargetProfile) (TargetAdapter, error) {
+		return &fakeAdapter{initDelay: 10 * time.Millisecond}, nil
+	})
+
+	// 5 targets: first 3 are typeA (will be removed), last 2 are typeB (survive)
+	targets := []TargetProfile{
+		{TargetID: "rm-1", TargetType: "typeA", Name: "Remove 1", Enabled: true, PollIntervalSecs: 3600, Status: TargetStatusPending},
+		{TargetID: "rm-2", TargetType: "typeA", Name: "Remove 2", Enabled: true, PollIntervalSecs: 3600, Status: TargetStatusPending},
+		{TargetID: "rm-3", TargetType: "typeA", Name: "Remove 3", Enabled: true, PollIntervalSecs: 3600, Status: TargetStatusPending},
+		{TargetID: "keep-1", TargetType: "typeB", Name: "Keep 1", Enabled: true, PollIntervalSecs: 3600, Status: TargetStatusPending},
+		{TargetID: "keep-2", TargetType: "typeB", Name: "Keep 2", Enabled: true, PollIntervalSecs: 3600, Status: TargetStatusPending},
+	}
+
+	sup.InitializeWithState(&HostState{
+		Identity: HostIdentity{HostID: "test-alias", ConnectorToken: "test-token", Label: "test"},
+		Config:   DefaultHostConfig(),
+		Targets:  targets,
+		Version:  1,
+	})
+
+	// Start all 5 workers
+	done := make(chan error, 1)
+	go func() { done <- sup.Reconcile() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Reconcile() returned error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reconcile() deadlocked")
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// Verify all 5 running
+	workers := sup.Status()
+	if len(workers) != 5 {
+		t.Fatalf("expected 5 workers, got %d", len(workers))
+	}
+
+	// Remove the first 3 targets (simulates desired-state sync after bulk move)
+	for _, id := range []string{"rm-1", "rm-2", "rm-3"} {
+		if err := sup.RemoveTarget(id); err != nil {
+			t.Fatalf("RemoveTarget(%s) error: %v", id, err)
+		}
+	}
+
+	time.Sleep(200 * time.Millisecond)
+
+	// The 2 surviving workers must still report their original TargetID and type
+	workers = sup.Status()
+	if len(workers) != 2 {
+		t.Fatalf("expected 2 workers after removal, got %d", len(workers))
+	}
+
+	foundKeep1, foundKeep2 := false, false
+	for _, ws := range workers {
+		switch ws.TargetID {
+		case "keep-1":
+			foundKeep1 = true
+		case "keep-2":
+			foundKeep2 = true
+		default:
+			t.Fatalf("unexpected surviving worker: %s", ws.TargetID)
+		}
+	}
+	if !foundKeep1 || !foundKeep2 {
+		t.Fatal("not all expected workers survived")
+	}
+
+	// Verify FindTarget still returns correct types (not aliased data)
+	for _, id := range []string{"keep-1", "keep-2"} {
+		tp := sup.FindTarget(id)
+		if tp == nil {
+			t.Fatalf("FindTarget(%s) returned nil", id)
+		}
+		if tp.TargetType != "typeB" {
+			t.Fatalf("FindTarget(%s) has wrong type: got %s, want typeB", id, tp.TargetType)
+		}
+		if tp.Name != "Keep 1" && tp.Name != "Keep 2" {
+			t.Fatalf("FindTarget(%s) has wrong name: got %s", id, tp.Name)
+		}
+	}
+
+	sup.Shutdown()
+}

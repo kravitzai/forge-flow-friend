@@ -271,23 +271,29 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 		return fmt.Errorf("max concurrent workers (%d) reached", s.state.Config.MaxConcurrentWorkers)
 	}
 
+	// Copy profile so the worker owns its data independent of slice mutations.
+	// Without this copy, workers hold pointers into s.state.Targets; when
+	// RemoveTarget shifts the slice or AddTarget triggers reallocation,
+	// surviving workers' profile pointers silently alias the wrong target.
+	profileCopy := *target
+
 	// Look up adapter factory
-	factory, ok := s.adapters[target.TargetType]
+	factory, ok := s.adapters[profileCopy.TargetType]
 	if !ok {
-		return fmt.Errorf("no adapter registered for target type: %s", target.TargetType)
+		return fmt.Errorf("no adapter registered for target type: %s", profileCopy.TargetType)
 	}
 
 	// Create adapter
-	adapter, err := factory(target)
+	adapter, err := factory(&profileCopy)
 	if err != nil {
-		return fmt.Errorf("create adapter for %s: %w", target.Name, err)
+		return fmt.Errorf("create adapter for %s: %w", profileCopy.Name, err)
 	}
 
 	// Load credentials
-	creds, err := s.store.LoadSecret(target.CredentialRef)
+	creds, err := s.store.LoadSecret(profileCopy.CredentialRef)
 	if err != nil {
 		adapter.Close()
-		return fmt.Errorf("load credentials for %s: %w", target.Name, err)
+		return fmt.Errorf("load credentials for %s: %w", profileCopy.Name, err)
 	}
 	if creds == nil {
 		creds = map[string]string{}
@@ -295,7 +301,7 @@ func (s *Supervisor) startWorkerLocked(target *TargetProfile) error {
 
 	// Create and start worker
 	worker := NewWorker(WorkerConfig{
-		Profile:     target,
+		Profile:     &profileCopy,
 		Adapter:     adapter,
 		Creds:       creds,
 		Policy:      s.policy,
@@ -524,7 +530,8 @@ func (s *Supervisor) FindTarget(targetID string) *TargetProfile {
 	}
 	for i := range s.state.Targets {
 		if s.state.Targets[i].TargetID == targetID {
-			return &s.state.Targets[i]
+			profileCopy := s.state.Targets[i]
+			return &profileCopy
 		}
 	}
 	return nil
