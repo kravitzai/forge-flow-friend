@@ -2,6 +2,11 @@
 //
 // Collects target health, basic metadata, and runtime posture from
 // a Prometheus server via its HTTP API. No admin mutations.
+//
+// Snapshot contract: the snapshotData object emitted by Collect()
+// matches the canonical PrometheusSnapshotData shape expected by
+// the frontend. All keys are camelCase, arrays are flat, and
+// summaries are pre-computed.
 
 package main
 
@@ -58,30 +63,30 @@ func (a *PrometheusAdapter) Init(profile *TargetProfile, creds map[string]string
 func (a *PrometheusAdapter) Collect() (map[string]interface{}, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 
-	buildInfo, _ := a.apiGet("/api/v1/status/buildinfo")
-	runtimeInfo, _ := a.apiGet("/api/v1/status/runtimeinfo")
-	targets, _ := a.apiGet("/api/v1/targets?state=active")
-	rules, _ := a.apiGet("/api/v1/rules?type=alert")
+	buildInfoRaw, _ := a.apiGet("/api/v1/status/buildinfo")
+	runtimeInfoRaw, _ := a.apiGet("/api/v1/status/runtimeinfo")
+	targetsRaw, _ := a.apiGet("/api/v1/targets?state=active")
+	rulesRaw, _ := a.apiGet("/api/v1/rules?type=alert")
 
-	// Summarize targets
-	targetSummary := summarizeTargets(targets)
-
-	// Summarize alerts from rules
-	alertSummary := summarizeAlertRules(rules)
+	// Normalize into the canonical PrometheusSnapshotData shape
+	buildInfo := normalizeBuildInfo(buildInfoRaw)
+	runtimeInfo := normalizeRuntimeInfo(runtimeInfoRaw)
+	targets, targetSummary := normalizeTargets(targetsRaw)
+	alertSummary, firingAlerts := normalizeAlertRules(rulesRaw)
 
 	snapshotData := map[string]interface{}{
-		"buildInfo":     extractData(buildInfo),
-		"runtimeInfo":   extractData(runtimeInfo),
-		"targets":       extractData(targets),
+		"buildInfo":     buildInfo,
+		"runtimeInfo":   runtimeInfo,
+		"targets":       targets,
 		"targetSummary": targetSummary,
-		"alertRules":    extractData(rules),
 		"alertSummary":  alertSummary,
+		"firingAlerts":  firingAlerts,
 	}
 
 	return map[string]interface{}{
 		"capabilities": a.Capabilities(),
 		"snapshotData": snapshotData,
-		"alerts":       alertSummary["firingAlerts"],
+		"alerts":       firingAlerts,
 		"collectedAt":  now,
 	}, nil
 }
@@ -142,61 +147,144 @@ func (a *PrometheusAdapter) apiGet(path string) (map[string]interface{}, error) 
 	return result, nil
 }
 
-func extractData(resp map[string]interface{}) interface{} {
+// ── Normalizers: coerce raw Prometheus API responses into canonical shape ──
+
+func normalizeBuildInfo(resp map[string]interface{}) map[string]interface{} {
+	result := map[string]interface{}{
+		"version":   nil,
+		"revision":  nil,
+		"branch":    nil,
+		"goVersion": nil,
+	}
 	if resp == nil {
-		return nil
+		return result
 	}
-	if d, ok := resp["data"]; ok {
-		return d
+	data := extractDataMap(resp)
+	if data == nil {
+		return result
 	}
-	return resp
+	result["version"] = data["version"]
+	result["revision"] = data["revision"]
+	result["branch"] = data["branch"]
+	result["goVersion"] = data["goVersion"]
+	return result
 }
 
-func summarizeTargets(resp map[string]interface{}) map[string]interface{} {
-	summary := map[string]interface{}{
-		"total_up": 0, "total_down": 0, "total_unknown": 0,
+func normalizeRuntimeInfo(resp map[string]interface{}) map[string]interface{} {
+	result := map[string]interface{}{
+		"storageRetention":  nil,
+		"tsdbDir":           nil,
+		"walCompression":    nil,
+		"alertmanagerCount": 0,
 	}
 	if resp == nil {
-		return summary
+		return result
 	}
-	data, _ := resp["data"].(map[string]interface{})
+	data := extractDataMap(resp)
 	if data == nil {
-		return summary
+		return result
 	}
-	active, _ := data["activeTargets"].([]interface{})
-	up, down, unknown := 0, 0, 0
-	for _, t := range active {
-		if tm, ok := t.(map[string]interface{}); ok {
-			switch tm["health"] {
-			case "up":
-				up++
-			case "down":
-				down++
-			default:
-				unknown++
+	if v, ok := data["storageRetention"]; ok {
+		result["storageRetention"] = v
+	}
+	// TSDB info may be nested
+	if tsdb, ok := data["TSDB"].(map[string]interface{}); ok {
+		if dir, ok := tsdb["dir"]; ok {
+			result["tsdbDir"] = dir
+		}
+		if wal, ok := tsdb["wal"].(map[string]interface{}); ok {
+			if comp, ok := wal["compression"]; ok {
+				result["walCompression"] = comp
 			}
 		}
 	}
-	summary["total_up"] = up
-	summary["total_down"] = down
-	summary["total_unknown"] = unknown
-	return summary
+	// Count configured alertmanagers
+	if amConfigured, ok := data["alertmanagersConfigured"].(float64); ok {
+		result["alertmanagerCount"] = int(amConfigured)
+	}
+	return result
 }
 
-func summarizeAlertRules(resp map[string]interface{}) map[string]interface{} {
+func normalizeTargets(resp map[string]interface{}) ([]map[string]interface{}, map[string]interface{}) {
 	summary := map[string]interface{}{
-		"totalRules": 0, "firingCount": 0, "firingAlerts": []map[string]interface{}{},
+		"totalUp":      0,
+		"totalDown":    0,
+		"totalUnknown": 0,
 	}
+
+	var targets []map[string]interface{}
 	if resp == nil {
-		return summary
+		return targets, summary
 	}
-	data, _ := resp["data"].(map[string]interface{})
+
+	data := extractDataMap(resp)
 	if data == nil {
-		return summary
+		return targets, summary
 	}
+
+	active, _ := data["activeTargets"].([]interface{})
+	up, down, unknown := 0, 0, 0
+	for _, t := range active {
+		tm, ok := t.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		labels, _ := tm["labels"].(map[string]interface{})
+		job := "unknown"
+		if labels != nil {
+			if j, ok := labels["job"].(string); ok {
+				job = j
+			}
+		}
+
+		healthRaw, _ := tm["health"].(string)
+		health := "unknown"
+		switch healthRaw {
+		case "up":
+			health = "up"
+			up++
+		case "down":
+			health = "down"
+			down++
+		default:
+			unknown++
+		}
+
+		scrapeUrl, _ := tm["scrapeUrl"].(string)
+		lastError, _ := tm["lastError"].(string)
+
+		targets = append(targets, map[string]interface{}{
+			"job":       job,
+			"health":    health,
+			"scrapeUrl": scrapeUrl,
+			"lastError": nilIfEmpty(lastError),
+		})
+	}
+
+	summary["totalUp"] = up
+	summary["totalDown"] = down
+	summary["totalUnknown"] = unknown
+	return targets, summary
+}
+
+func normalizeAlertRules(resp map[string]interface{}) (map[string]interface{}, []map[string]interface{}) {
+	alertSummary := map[string]interface{}{
+		"totalRules":  0,
+		"firingCount": 0,
+	}
+	var firingAlerts []map[string]interface{}
+
+	if resp == nil {
+		return alertSummary, firingAlerts
+	}
+
+	data := extractDataMap(resp)
+	if data == nil {
+		return alertSummary, firingAlerts
+	}
+
 	groups, _ := data["groups"].([]interface{})
 	totalRules, firingCount := 0, 0
-	var firingAlerts []map[string]interface{}
 
 	for _, g := range groups {
 		gm, _ := g.(map[string]interface{})
@@ -214,16 +302,40 @@ func summarizeAlertRules(resp map[string]interface{}) map[string]interface{} {
 			if state == "firing" {
 				firingCount++
 				name, _ := rm["name"].(string)
+				labels, _ := rm["labels"].(map[string]interface{})
+				severity := "warning"
+				if labels != nil {
+					if s, ok := labels["severity"].(string); ok {
+						severity = s
+					}
+				}
 				firingAlerts = append(firingAlerts, map[string]interface{}{
-					"severity": "warning",
-					"source":   "prometheus",
+					"name":     name,
+					"severity": severity,
+					"state":    "firing",
 					"message":  fmt.Sprintf("Alert firing: %s", name),
 				})
 			}
 		}
 	}
-	summary["totalRules"] = totalRules
-	summary["firingCount"] = firingCount
-	summary["firingAlerts"] = firingAlerts
-	return summary
+
+	alertSummary["totalRules"] = totalRules
+	alertSummary["firingCount"] = firingCount
+	return alertSummary, firingAlerts
+}
+
+// ── Helpers ──
+
+func extractDataMap(resp map[string]interface{}) map[string]interface{} {
+	if d, ok := resp["data"].(map[string]interface{}); ok {
+		return d
+	}
+	return resp
+}
+
+func nilIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
