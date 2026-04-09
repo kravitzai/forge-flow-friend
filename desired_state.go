@@ -676,6 +676,12 @@ func (sm *SyncManager) applyHostConfig(override *HostConfigOverride) {
 		}
 	}
 
+	// Propagate to running workers immediately so the next collection
+	// cycle picks up the change without restarting workers.
+	if override.DisplayMode == "lan-only" || override.DisplayMode == "hybrid" {
+		sm.supervisor.SetLanOnly(override.DisplayMode == "lan-only")
+	}
+
 	if changed {
 		audit.Info("sync.reconciled", "Applied host config overrides")
 	}

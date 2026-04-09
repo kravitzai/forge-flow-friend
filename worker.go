@@ -448,7 +448,11 @@ func (w *Worker) collect() {
 
 	// ── Cloud upload ──
 	// Skipped entirely in LAN only mode — snapshots are local DB only.
-	if w.lanOnly {
+	w.mu.RLock()
+	lanOnly := w.lanOnly
+	w.mu.RUnlock()
+
+	if lanOnly {
 		audit.Debug("upload.skipped", "LAN only mode — snapshot not sent to cloud",
 			w.targetFields()...)
 	} else {
@@ -632,6 +636,26 @@ func (w *Worker) setStatus(status WorkerStatus) {
 func (w *Worker) notifyStateChange(status WorkerStatus) {
 	if w.onStateChange != nil {
 		w.onStateChange(w.profile.TargetID, status)
+	}
+}
+
+// SetLanOnly updates the worker's cloud upload suppression flag at runtime.
+// Called when the host display_mode changes via desired-state sync without
+// restarting workers. Thread-safe.
+func (w *Worker) SetLanOnly(v bool) {
+	w.mu.Lock()
+	prev := w.lanOnly
+	w.lanOnly = v
+	w.mu.Unlock()
+
+	if prev != v {
+		if v {
+			audit.Info("security.lan_only", "Worker switched to LAN only mode — cloud uploads suppressed",
+				w.targetFields()...)
+		} else {
+			audit.Info("security.lan_only", "Worker switched to hybrid mode — cloud uploads resumed",
+				w.targetFields()...)
+		}
 	}
 }
 

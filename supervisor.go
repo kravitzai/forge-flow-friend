@@ -578,6 +578,21 @@ func (s *Supervisor) BroadcastHeartbeat() {
 	}
 }
 
+// SetLanOnly propagates a runtime LAN-only mode change to all running workers.
+// Safe to call from any goroutine.
+func (s *Supervisor) SetLanOnly(lanOnly bool) {
+	s.mu.RLock()
+	workers := make([]*Worker, 0, len(s.workers))
+	for _, w := range s.workers {
+		workers = append(workers, w)
+	}
+	s.mu.RUnlock()
+
+	for _, w := range workers {
+		w.SetLanOnly(lanOnly)
+	}
+}
+
 // AgentHealthSummary returns a quick overview of aggregate worker health for diagnostics.
 func (s *Supervisor) AgentHealthSummary() map[string]interface{} {
 	s.mu.RLock()
