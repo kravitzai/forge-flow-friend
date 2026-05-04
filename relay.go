@@ -128,9 +128,9 @@ func (rh *RelayHandler) ProcessCommands(commands []RelayCommand) {
 
 	results := make([]RelayResult, 0, len(commands))
 	for _, cmd := range commands {
-		// System commands (restart, version) bypass the live query gate —
-		// they have their own granular check in system_commands.go
-		if cmd.Platform != "system" && !liveQueryEnabled {
+		// System commands and ai-fabric probes bypass the live query gate —
+		// they have their own granular checks (or none, since they don't touch targets).
+		if cmd.Platform != "system" && cmd.Platform != "ai-fabric" && !liveQueryEnabled {
 			log.Printf("[relay] REJECTED cmd=%s: remote Live Query is disabled on this host (set FORGEAI_REMOTE_LIVE_QUERY=true to enable)", cmd.ID)
 			results = append(results, RelayResult{
 				ID:           cmd.ID,
@@ -176,6 +176,11 @@ func (rh *RelayHandler) executeCommand(cmd RelayCommand) RelayResult {
 	// ── System commands (restart, etc.) ──
 	if cmd.Platform == "system" {
 		return rh.executeSystemCommand(cmd, start)
+	}
+
+	// ── AI Fabric probes — local HTTP reachability check, no target profile ──
+	if cmd.Platform == "ai-fabric" {
+		return rh.executeAIFabricProbe(cmd, start)
 	}
 
 	// Platform allow-list check
