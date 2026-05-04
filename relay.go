@@ -79,6 +79,7 @@ func NewRelayHandler(supervisor *Supervisor, backend *BackendClient, store *Stor
 		changePolicy:        changePolicy,
 		allowedSafetyLevels: safetyLevels,
 		allowedPlatforms: map[string]bool{
+			"ai-fabric":       true,
 			"proxmox":         true,
 			"ollama":          true,
 			"nutanix":         true,
