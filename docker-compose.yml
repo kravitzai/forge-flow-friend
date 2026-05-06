@@ -19,6 +19,13 @@ services:
     container_name: forgeai-host
     restart: unless-stopped
 
+    # ── Networking ──
+    # Host networking lets the agent reach every LAN segment the Docker host
+    # itself can route to (e.g. 10.10.100.0/24 in addition to 192.168.40.0/24).
+    # In bridge mode the container is NAT'd and may be unable to reach hosts
+    # on subnets the Docker host can route to. See README "Network requirements".
+    network_mode: host
+
     # ── Security hardening ──
     read_only: true
     security_opt:
