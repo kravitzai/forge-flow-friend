@@ -90,6 +90,8 @@ history; the context-first docs are authoritative for direction.
     — Public Docs Publishing for Phase Doc Links (Phase 6H-G.3). Adds whitelist-driven mirroring of referenced phase docs into the existing public repo `kravitzai/forge-flow-friend` via the same private→public sync workflow. Whitelist (`scripts/public-docs-whitelist.txt`) + export script (`scripts/export-public-docs.sh`) + registry-drift test in `contextFirstRegistry.test.ts`. No app runtime, registry, edge function, or CMS changes.
 36. [`toolchains-phase-6i-a-canonical-san-zoning-model.md`](./toolchains-phase-6i-a-canonical-san-zoning-model.md)
     — Canonical SAN Zoning Model (Phase 6I-A). Vendor-neutral foundation for upcoming Cisco MDS / Brocade zoning normalizers and the Cisco → Brocade conversion plan engine. Pure types, helpers, invariants, fixtures, and tests under `src/lib/canonicalZoning/`. No vendor parsers, no conversion logic, no command generation, no UI/registry/CMS/edge changes.
+37. [`toolchains-phase-6i-b-cisco-mds-canonical-normalizer.md`](./toolchains-phase-6i-b-cisco-mds-canonical-normalizer.md)
+    — Cisco MDS → Canonical Zoning Normalizer (Phase 6I-B). Pure parser/composer layer that turns NX-OS `show` outputs into `canonical-san-zoning@v1`. Per-command parsers, deterministic ID minting, alias placeholder + VSAN logical-fabric synthesis for partial evidence. No registry, runtime adapter, edge function, CMS, or UI changes.
 
 ## Operator Tracker
 
