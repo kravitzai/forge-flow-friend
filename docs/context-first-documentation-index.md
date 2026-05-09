@@ -88,6 +88,8 @@ history; the context-first docs are authoritative for direction.
     — Phase Doc Resolver + SRDF Analyzer Surface Promotion (Phase 6H-G). 6H-G.0 fixes broken Engine Catalog "Phase doc" links via a configurable `VITE_SOURCE_DOCS_BASE_URL` resolver. 6H-G.1 promotes the Dell PowerMax SRDF Analyzer into the standalone/catalog runner surface (un-hidden, attached to `powermax-tier0-change-windows`, with minimal/full samples and a real PowerMax read-only agent collector). Registry + UI link wiring only — engine logic, edge function, governance, critic, and the legacy SRDF play are unchanged.
 35. [`toolchains-phase-6h-g-3-public-docs-publishing.md`](./toolchains-phase-6h-g-3-public-docs-publishing.md)
     — Public Docs Publishing for Phase Doc Links (Phase 6H-G.3). Adds whitelist-driven mirroring of referenced phase docs into the existing public repo `kravitzai/forge-flow-friend` via the same private→public sync workflow. Whitelist (`scripts/public-docs-whitelist.txt`) + export script (`scripts/export-public-docs.sh`) + registry-drift test in `contextFirstRegistry.test.ts`. No app runtime, registry, edge function, or CMS changes.
+36. [`toolchains-phase-6i-a-canonical-san-zoning-model.md`](./toolchains-phase-6i-a-canonical-san-zoning-model.md)
+    — Canonical SAN Zoning Model (Phase 6I-A). Vendor-neutral foundation for upcoming Cisco MDS / Brocade zoning normalizers and the Cisco → Brocade conversion plan engine. Pure types, helpers, invariants, fixtures, and tests under `src/lib/canonicalZoning/`. No vendor parsers, no conversion logic, no command generation, no UI/registry/CMS/edge changes.
 
 ## Operator Tracker
 
