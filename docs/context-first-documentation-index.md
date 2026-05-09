@@ -94,6 +94,8 @@ history; the context-first docs are authoritative for direction.
     — Cisco MDS → Canonical Zoning Normalizer (Phase 6I-B). Pure parser/composer layer that turns NX-OS `show` outputs into `canonical-san-zoning@v1`. Per-command parsers, deterministic ID minting, alias placeholder + VSAN logical-fabric synthesis for partial evidence. No registry, runtime adapter, edge function, CMS, or UI changes.
 38. [`toolchains-phase-6i-c-brocade-canonical-normalizer.md`](./toolchains-phase-6i-c-brocade-canonical-normalizer.md)
     — Brocade FOS → Canonical Zoning Normalizer (Phase 6I-C). Pure parser/composer layer that turns Fabric OS `show` outputs into `canonical-san-zoning@v1`. Includes the 6I-A.2 canonical extension that adds the `domain-index` (D,I) zone-member kind. Deterministic IDs, FID-aware logical fabric, alias placeholder synthesis, exact pinned golden test. No `brocadeAdapter`, `brocadeRuntime`, `brocadeClientActions`, `brocadeReportComposer`, registry, runtime, edge function, CMS, or UI changes.
+39. [`toolchains-phase-6i-d-cisco-to-brocade-conversion-plan.md`](./toolchains-phase-6i-d-cisco-to-brocade-conversion-plan.md)
+    — Cisco → Brocade Conversion Plan, advisory only (Phase 6I-D). Pure logic layer under `src/lib/canonicalZoning/conversion/` that consumes a Cisco canonical source, a Brocade canonical target, and operator `MappingRules`, and emits a `ConversionPlan` (`plannedTarget`, `actions`, `findings`) with deterministic action IDs. Strict no-command boundary enforced by safety tests (no `command|cli|script|apply|execute|run` keys, no executable phrasing). Pinned full-object golden plan. No registry, runtime, edge function, CMS, or UI changes. Next: 6I-E (diff engine), 6I-F (pseudo-command descriptors).
 
 ## Operator Tracker
 
