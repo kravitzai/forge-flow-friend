@@ -92,6 +92,8 @@ history; the context-first docs are authoritative for direction.
     — Canonical SAN Zoning Model (Phase 6I-A). Vendor-neutral foundation for upcoming Cisco MDS / Brocade zoning normalizers and the Cisco → Brocade conversion plan engine. Pure types, helpers, invariants, fixtures, and tests under `src/lib/canonicalZoning/`. No vendor parsers, no conversion logic, no command generation, no UI/registry/CMS/edge changes.
 37. [`toolchains-phase-6i-b-cisco-mds-canonical-normalizer.md`](./toolchains-phase-6i-b-cisco-mds-canonical-normalizer.md)
     — Cisco MDS → Canonical Zoning Normalizer (Phase 6I-B). Pure parser/composer layer that turns NX-OS `show` outputs into `canonical-san-zoning@v1`. Per-command parsers, deterministic ID minting, alias placeholder + VSAN logical-fabric synthesis for partial evidence. No registry, runtime adapter, edge function, CMS, or UI changes.
+38. [`toolchains-phase-6i-c-brocade-canonical-normalizer.md`](./toolchains-phase-6i-c-brocade-canonical-normalizer.md)
+    — Brocade FOS → Canonical Zoning Normalizer (Phase 6I-C). Pure parser/composer layer that turns Fabric OS `show` outputs into `canonical-san-zoning@v1`. Includes the 6I-A.2 canonical extension that adds the `domain-index` (D,I) zone-member kind. Deterministic IDs, FID-aware logical fabric, alias placeholder synthesis, exact pinned golden test. No `brocadeAdapter`, `brocadeRuntime`, `brocadeClientActions`, `brocadeReportComposer`, registry, runtime, edge function, CMS, or UI changes.
 
 ## Operator Tracker
 
