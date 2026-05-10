@@ -74,3 +74,23 @@ edge function (audit-only)
 ## Phase status
 
 Complete pending acceptance.
+
+## 6J-B.1 — Toolchain ↔ Advisor cross-links
+
+Presentation-only patch closing the discoverability gap between the legacy
+6D pseudo-command generator and this advisor.
+
+- `EngineResultPanel` now renders a **Next steps** block after a
+  successful run, driven by `descriptor.nextSteps` on
+  `ToolchainEngineDescriptor` (registry metadata only — never
+  executable). The 6D `cisco-to-brocade-migration-pseudo-commands`
+  descriptor and the 6G-C `cisco-mds-zoning-analyzer` descriptor surface
+  links to **Open Pseudo-Command Review** and **Open Conversion
+  Advisor**.
+- The SAN migration toolchain page (`cisco-mds-to-brocade-san-migration-validation`)
+  renders a `DedicatedEngineTeasers` card linking to the advisor's
+  standalone detail route. This covers engines that are intentionally
+  `hiddenFromActionPanel: true` but expose a `dedicatedPanel`.
+- No runtime, audit, edge, pipeline, or business-logic change. Forbidden
+  labels (`Run`, `Apply`, `Execute`, `Push`, `Activate`) remain absent
+  from advisor surfaces; the new links are pure navigation.
